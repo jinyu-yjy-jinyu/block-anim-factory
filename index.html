@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%234a8cff'/><rect x='7' y='8' width='18' height='4' rx='2' fill='white'/><rect x='10' y='14' width='12' height='4' rx='2' fill='white' opacity='.8'/><rect x='13' y='20' width='6' height='4' rx='2' fill='white' opacity='.6'/></svg>">
+<title>积木动画工厂 · V0 原型</title>
+<link rel="stylesheet" href="src/styles.css">
+<link rel="stylesheet" href="src/panels.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ============ 顶部菜单 ============ -->
+  <header id="menubar">
+    <div class="brand"><span class="logo">▚</span> 积木动画工厂 <em>V0 原型</em></div>
+    <nav class="menus">
+      <div class="menu" data-menu="file">
+        <button>文件</button>
+        <ul class="dropdown">
+          <li data-act="file.new">新建工程</li>
+          <li data-act="file.open">打开工程 JSON…</li>
+          <li data-act="file.save">保存工程 JSON</li>
+          <li data-act="file.import">导入积木文本…</li>
+          <li class="sep"></li>
+          <li data-act="export.png">导出当前帧 PNG</li>
+          <li data-act="export.frames">导出 PNG 序列帧（ZIP）</li>
+          <li data-act="export.gif">导出 GIF（自带编码器）</li>
+          <li class="sep"></li>
+          <li data-act="file.demo">载入示例：波形音频柱</li>
+        </ul>
+      </div>
+      <div class="menu" data-menu="edit">
+        <button>编辑</button>
+        <ul class="dropdown">
+          <li data-act="edit.undo">撤销</li>
+          <li data-act="edit.redo">重做</li>
+          <li class="sep"></li>
+          <li data-act="edit.dup">复制选中积木</li>
+          <li data-act="edit.del">删除选中积木</li>
+          <li class="sep"></li>
+          <li data-act="edit.prefs">打开偏好设置</li>
+        </ul>
+      </div>
+      <div class="menu" data-menu="view">
+        <button>视图</button>
+        <ul class="dropdown">
+          <li data-act="view.zoomFit">适应窗口</li>
+          <li data-act="view.zoomIn">放大 +</li>
+          <li data-act="view.zoomOut">缩小 −</li>
+          <li class="sep"></li>
+          <li data-act="view.panelBlocks">定位到积木画布</li>
+          <li data-act="view.panelLayers">定位到场景树</li>
+          <li data-act="view.panelInspector">定位到属性面板</li>
+          <li class="sep"></li>
+          <li data-act="view.shortcuts">快捷键说明</li>
+        </ul>
+      </div>
+      <div class="menu" data-menu="help">
+        <button>帮助</button>
+        <ul class="dropdown">
+          <li data-act="help.start">快速上手</li>
+          <li data-act="help.ir">IR 规范说明</li>
+          <li data-act="help.render">渲染一致性说明</li>
+        </ul>
+      </div>
+    </nav>
+    <div class="right">
+      <span id="statusText" class="status">就绪</span>
+    </div>
+  </header>
+
+  <!-- ============ 工具条 ============ -->
+  <div id="toolbar">
+    <button class="tb" data-act="edit.undo" title="撤销 (Ctrl+Z)">↶</button>
+    <button class="tb" data-act="edit.redo" title="重做 (Ctrl+Shift+Z)">↷</button>
+    <span class="tbsep"></span>
+    <button class="tb primary" data-act="play" title="播放/暂停 (空格)">▶ 播放</button>
+    <button class="tb" data-act="rewind" title="回到开头">⏮</button>
+    <button class="tb" data-act="prevFrame" title="上一帧 (,)">◀|</button>
+    <button class="tb" data-act="nextFrame" title="下一帧 (.)">|▶</button>
+    <span class="tbsep"></span>
+    <label class="tbf">画布
+        <select id="presetSelect">
+          <option value="1080x1920">竖屏 9:16</option>
+          <option value="1920x1080" selected>横屏 16:9</option>
+          <option value="1080x1080">方形 1:1</option>
+          <option value="1080x1350">竖版 4:5</option>
+        </select>
+      </label>
+      <label class="tbf">FPS
+        <select id="fpsSelect">
+          <option>12</option><option selected>24</option><option>25</option><option>30</option><option>60</option>
+        </select>
+      </label>
+      <label class="tbf">缩放
+        <select id="zoomSelect">
+          <option value="fit" selected>适应</option>
+          <option value="0.25">25%</option><option value="0.5">50%</option>
+          <option value="1">100%</option>
+        </select>
+      </label>
+      <span class="tbsep"></span>
+      <button class="tb" data-act="edit.dup">复制</button>
+      <button class="tb" data-act="edit.del">删除</button>
+      <span class="tbsep"></span>
+      <button class="tb" data-act="tpl.open">模板…</button>
+      <button class="tb" data-act="debug.panel">调试器</button>
+    </div>
+
+  <!-- ============ 主体三栏 ============ -->
+  <main id="main">
+
+    <!-- 左：场景树 -->
+    <aside id="leftPanel" class="panel">
+      <div class="panel-head">
+        <span>场景 / 图层</span>
+        <div class="panel-actions">
+          <button data-act="layer.add" title="新增图层">＋</button>
+          <button data-act="layer.del" title="删除图层">－</button>
+        </div>
+      </div>
+      <div class="layer-tools">
+        <button data-act="scene.group" title="把选中图层打包成组（可嵌套）">编组</button>
+        <button data-act="scene.instance" title="把图层登记为可复用主组件">主组件</button>
+        <button data-act="scene.place" title="插入一个主组件的实例">放实例</button>
+      </div>
+      <div id="layerTree" class="panel-body scroll"></div>
+      <div class="panel-head sub"><span>项目设置</span></div>
+      <div id="projSettings" class="panel-body"></div>
+    </aside>
+
+    <!-- 中：舞台 -->
+    <section id="center">
+      <div id="stageWrap">
+        <div id="stageBox">
+          <canvas id="stage"></canvas>
+          <div id="stageOverlay"></div>
+        </div>
+      </div>
+      <div id="timelineBar">
+        <div class="tl-left">
+          <span class="tlabel">时间码</span>
+          <code id="timecode">00:00.00 / 00:00.00</code>
+        </div>
+        <div class="tl-mid">
+          <div id="ruler"></div>
+          <div id="track">
+            <div id="markerLayer"></div>
+            <div id="playhead"><div class="ph-grip"></div></div>
+          </div>
+        </div>
+        <div class="tl-right">
+          <span class="tlabel">时长</span>
+          <input id="durationInput" type="number" step="0.1" min="0.5" value="6">
+        </div>
+      </div>
+    </section>
+
+    <!-- 右：积木 + 属性 -->
+    <aside id="rightPanel" class="panel">
+      <div class="tabs" id="rightTabs">
+        <button class="tab active" data-tab="blocks">积木</button>
+        <button class="tab" data-tab="inspector">属性</button>
+        <button class="tab" data-tab="palette">图层</button>
+        <button class="tab" data-tab="nodes">节点</button>
+        <button class="tab" data-tab="subtitle">字幕</button>
+        <button class="tab" data-tab="audio">音频</button>
+        <button class="tab" data-tab="data">数据</button>
+      </div>
+
+      <div class="tab-page active" id="tab-blocks">
+        <div class="panel-head"><span>积木</span>
+          <div class="panel-actions">
+            <button data-act="block.clean" title="整理积木">整理</button>
+          </div>
+        </div>
+        <div id="blockCanvas" class="scroll blocks-canvas"></div>
+      </div>
+
+      <div class="tab-page" id="tab-inspector">
+        <div class="panel-head"><span>属性面板</span></div>
+        <div id="inspector" class="panel-body scroll"></div>
+      </div>
+
+      <div class="tab-page" id="tab-palette">
+        <div class="panel-head"><span>图层属性</span></div>
+        <div id="layerProps" class="panel-body scroll"></div>
+      </div>
+
+      <!-- 节点图：积木视图的同源投影 -->
+      <div class="tab-page" id="tab-nodes">
+        <div class="panel-head"><span>节点图</span>
+          <div class="panel-actions">
+            <button data-act="node.fromBlocks" title="从积木重建节点图">从积木</button>
+            <button data-act="node.toBlocks" title="把节点图线性化回积木（可能有损）">回积木</button>
+            <button data-act="node.auto" title="自动布局">布局</button>
+          </div>
+        </div>
+        <div id="nodeCanvas" class="scroll node-canvas">
+          <svg id="nodeSvg" class="node-svg"></svg>
+          <div id="nodeLayer"></div>
+        </div>
+        <div id="nodeReport" class="node-report"></div>
+      </div>
+
+      <!-- 字幕：SRT/ASS/VTT 导入导出 -->
+      <div class="tab-page" id="tab-subtitle">
+        <div class="panel-head"><span>字幕</span>
+          <div class="panel-actions">
+            <button data-act="sub.import">导入</button>
+            <button data-act="sub.export">导出</button>
+            <button data-act="sub.validate" title="检查爆字数/重叠/超时">检查</button>
+          </div>
+        </div>
+        <div class="sub-toolbar">
+          <select id="subStyle" title="字幕样式"></select>
+          <button data-act="sub.addCue" title="在当前时间新增一条">+ 条</button>
+          <button data-act="sub.words" title="按字数比例补齐逐词时间码">逐词</button>
+          <button data-act="sub.split" title="把过长的字幕拆成多条">拆句</button>
+        </div>
+        <div id="subList" class="scroll sub-list"></div>
+        <div id="subIssues" class="sub-issues"></div>
+        <input type="file" id="subFile" accept=".srt,.ass,.ssa,.vtt" hidden>
+      </div>
+
+      <!-- 音频：录音台 + 波形编辑器 + 响度 -->
+      <div class="tab-page" id="tab-audio">
+        <div class="panel-head"><span>音频</span>
+          <div class="panel-actions">
+            <button data-act="audio.import">导入音频</button>
+            <button data-act="audio.export">导出混音</button>
+          </div>
+        </div>
+
+        <div class="rec-bar">
+          <button id="recBtn" class="rec-btn" data-act="audio.rec" title="开始/停止录音">● 录音</button>
+          <div class="meter"><div id="recLevel" class="meter-fill"></div></div>
+          <span id="recTime" class="mono">00:00.0</span>
+          <label class="chk" title="降噪"><input type="checkbox" id="recDenoise">降噪</label>
+          <label class="chk" title="自动闪避（人声时压低背景音乐）"><input type="checkbox" id="recDuck">闪避</label>
+        </div>
+
+        <div class="wave-wrap">
+          <canvas id="waveCanvas" height="120"></canvas>
+          <div id="waveCursor" class="wave-cursor"></div>
+        </div>
+        <div class="wave-toolbar">
+          <button data-act="wave.zoomOut">－</button>
+          <button data-act="wave.zoomIn">＋</button>
+          <button data-act="wave.fit">全览</button>
+          <span class="sep"></span>
+          <button data-act="wave.trim">裁剪选区</button>
+          <button data-act="wave.delete">删除选区</button>
+          <button data-act="wave.silence">静音选区</button>
+          <span class="sep"></span>
+          <button data-act="wave.fadeIn">淡入</button>
+          <button data-act="wave.fadeOut">淡出</button>
+          <button data-act="wave.gainUp">＋3dB</button>
+          <button data-act="wave.gainDown">－3dB</button>
+          <span class="sep"></span>
+          <button data-act="wave.removeSilence">去静音</button>
+          <button data-act="wave.normalize" title="归一化到 -1dBFS">归一化</button>
+          <button data-act="wave.undo">撤销</button>
+        </div>
+
+        <div class="audio-info">
+          <div class="loudness-row">
+            <span class="lbl">响度</span>
+            <strong id="loudVal" class="mono">—</strong>
+            <span class="lbl">峰值</span>
+            <strong id="peakVal" class="mono">—</strong>
+            <span class="lbl">BPM</span>
+            <strong id="bpmVal" class="mono">—</strong>
+          </div>
+          <div class="loudness-bar"><div id="loudFill" class="loudness-fill"></div><div class="loudness-target"></div></div>
+          <div class="preset-row" id="loudPresets"></div>
+          <div class="sfx-row" id="sfxRow"></div>
+        </div>
+        <input type="file" id="audioFile" accept="audio/*,.wav,.mp3,.m4a,.ogg,.webm" hidden>
+      </div>
+
+      <!-- 数据：数据绑定 + 批量渲染 -->
+      <div class="tab-page" id="tab-data">
+        <div class="panel-head"><span>数据驱动</span>
+          <div class="panel-actions">
+            <button data-act="data.paste">粘贴数据</button>
+            <button data-act="data.clear">清空</button>
+          </div>
+        </div>
+        <div class="data-toolbar">
+          <button data-act="data.fetch" title="从 CSV / JSON 网址拉取">拉取网址</button>
+          <input type="file" id="dataFile" accept=".csv,.tsv,.json,.txt" hidden>
+          <span id="dataCount" class="lbl">0 行</span>
+        </div>
+        <div id="dataPreview" class="scroll data-preview"></div>
+        <div id="bindList" class="bind-list"></div>
+        <div class="batch-bar">
+          <input id="batchName" placeholder="命名模板：{列名}" />
+          <button data-act="batch.run" class="primary">批量渲染</button>
+          <button data-act="batch.pause">暂停</button>
+          <button data-act="batch.zip">打包下载</button>
+        </div>
+        <div id="batchProgress" class="batch-progress"></div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ============ 调试器 ============ -->
+  <section id="debugPanel" class="hidden">
+    <div class="panel-head">
+      <span>调试器 · 程序化时间轴逐帧执行</span>
+      <div class="panel-actions">
+        <button data-act="dbg.stepIn" title="单步进入 (F10)">单步</button>
+        <button data-act="dbg.tpToggle" title="切换断点 (F9)">断点</button>
+        <button data-act="dbg.clear">清空</button>
+        <button data-act="dbg.close">关闭</button>
+      </div>
+    </div>
+    <div class="dbg-grid">
+      <div class="dbg-col">
+        <div class="dbg-title">执行栈（积木调用）</div>
+        <div id="dbgStack" class="scroll"></div>
+        <div class="dbg-title">变量监视</div>
+        <div id="dbgVars" class="scroll"></div>
+      </div>
+      <div class="dbg-col">
+        <div class="dbg-title">属性探针</div>
+        <div id="dbgProbe" class="scroll"></div>
+        <div class="dbg-title">本帧指令日志</div>
+        <div id="dbgLog" class="scroll"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 块库抽屉 ============ -->
+  <section id="paletteDrawer" class="hidden">
+    <div class="panel-head"><span>积木库</span>
+      <div class="panel-actions"><button data-act="palette.close">关闭</button></div>
+    </div>
+    <div id="paletteBody" class="scroll"></div>
+  </section>
+
+  <!-- ============ 对话框 ============ -->
+  <div id="modalLayer" class="hidden">
+    <div id="modalCard">
+      <div class="modal-head"><span id="modalTitle">标题</span><button data-act="modal.close">✕</button></div>
+      <div id="modalBody" class="modal-body scroll"></div>
+      <div class="modal-foot" id="modalFoot"></div>
+    </div>
+  </div>
+
+  <!-- ============ 导出进度 ============ -->
+  <div id="exportLayer" class="hidden">
+    <div id="exportCard">
+      <div id="exportTitle">导出中…</div>
+      <div class="progress"><div id="exportBar"></div></div>
+      <div id="exportInfo">—</div>
+      <button data-act="export.cancel" class="danger">取消</button>
+    </div>
+  </div>
+
+  <input type="file" id="fileInput" accept=".json,.txt" hidden>
+  <div id="toast"></div>
+</div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

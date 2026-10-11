@@ -1,0 +1,35 @@
+{
+  "name": "block-anim-factory",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "积木动画工厂 · 用积木搭动画逻辑的可视化编程动画制作软件（零构建、零依赖纯前端）",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node scripts/test-all.mjs",
+    "test:logic": "node run-tests.mjs",
+    "test:audio": "node test-audio.mjs",
+    "test:video": "node test-video.mjs",
+    "test:custom": "node test-custom.mjs",
+    "test:scene": "node test-scene.mjs",
+    "test:node": "node test-node-batch.mjs",
+    "test:pipeline": "node test-pipeline.mjs",
+    "test:browser": "node test-browser.mjs",
+    "test:visual": "node test-visual.mjs",
+    "screenshots": "node make-screenshots.mjs"
+  },
+  "keywords": [
+    "animation",
+    "visual-programming",
+    "no-code",
+    "canvas",
+    "audio-driven",
+    "subtitle",
+    "video-export"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "playwright-core": "^1.64.0"
+  }
+}

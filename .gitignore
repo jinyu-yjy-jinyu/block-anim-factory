@@ -1,0 +1,19 @@
+# 依赖
+node_modules/
+
+# 运行时产物
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 测试/截图过程中的临时文件
+_chk.mjs
+dbg*.mjs
+
+# 注意：screenshots/ 是 README 引用的产物，**故意提交**
