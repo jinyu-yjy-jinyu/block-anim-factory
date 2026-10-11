@@ -29,6 +29,13 @@ import { CustomBlockLibrary, CustomBlock, extractFunction, expandCustomBlocks } 
 import * as SUB_EXPORTS from './subtitles.js';
 import * as APP_INTERP from './batch.js';
 
+/* ---------- V3/V4：模板市场 / 素材库 / AI 辅助 / 版本协作 ---------- */
+import { Marketplace, AssetLib, synthSfx, ASSET_KINDS } from './marketplace.js';
+import * as AI from './ai.js';
+import { Repo } from './collab.js';
+import * as IR_MOD from './ir.js';
+import * as APP_BATCH from './batch.js';
+
 /* ---------- 注册 op 元数据（供积木文本解析用） ---------- */
 registerOpMeta(BLOCK_DEFS.map(d => metaFor(d.op)).filter(Boolean));
 
@@ -65,6 +72,14 @@ const App = {
   audioDesk: null,
   dataPanel: null,
   caps: null,               // 导出能力探测结果
+
+  /* ---------- V3/V4 ---------- */
+  market: null,             // Marketplace
+  assets: null,             // AssetLib（免版权素材）
+  repo: null,               // Repo（版本与分支）
+  selectedTemplateId: null,
+  selectedRevisionId: null,
+  gitMergeInfo: null,
 };
 
 const undoStack = [];
@@ -218,7 +233,828 @@ function initNewPanels() {
   const ss = $('subStyle');
   if (ss) ss.addEventListener('change', () => App.subPanel.setStyleAll(ss.value));
 
+  initMarket();
+  initVersioning();
+
   refreshNodeGraph();
+}
+
+/* ============================================================
+   V3/V4 · 模板市场
+   ============================================================ */
+function initMarket() {
+  App.market = new Marketplace({ currentUser: '我' });
+  App.assets = new AssetLib();
+
+  // 把 6 套官方模板灌进市场，这样「一键 Remix」就有东西可 Remix
+  App.market.seedFrom(TEMPLATES.map((t, i) => ({
+    ir: t.make(),
+    meta: {
+      name: t.name, author: '官方', category: categoryForTemplate(t.key),
+      description: t.desc, version: '1.0.0',
+      tags: tagsForTemplate(t.key), price: 0,
+      previewTimes: [0.3, 2, 4],
+    },
+    _i: i,
+  })));
+
+  // 市场搜索 / 排序
+  const q = $('mktQuery');
+  if (q) {
+    let timer = 0;
+    q.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(renderMarketList, 180);
+    });
+  }
+  const sort = $('mktSort');
+  if (sort) sort.addEventListener('change', renderMarketList);
+
+  const file = $('mktFile');
+  if (file) file.addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const t = App.market.importTemplate(await f.text());
+      renderMarketList();
+      renderMarketDetail(t.id);
+      toast(`已导入模板「${t.name}」v${t.version}`, 'ok');
+    } catch (err) {
+      toast('模板包导入失败：' + err.message, 'err', 4000);
+    }
+    e.target.value = '';
+  });
+
+  renderMarketCats();
+  renderMarketList();
+}
+
+function categoryForTemplate(key) {
+  return { karaoke: 'speech', barChart: 'data', popTitle: 'intro', ring: 'product', particles: 'product', audioBars: 'intro' }[key] || 'official';
+}
+function tagsForTemplate(key) {
+  return { karaoke: ['字幕', '口播'], barChart: ['数据', '图表'], popTitle: ['标题', '片头'], ring: ['频谱', '音乐'], particles: ['粒子'], audioBars: ['音频', '音乐'] }[key] || [];
+}
+
+function renderMarketCats() {
+  const box = $('mktCats');
+  if (!box) return;
+  box.innerHTML = '';
+  const cats = [{ key: 'all', label: '全部' }].concat(MK_CATS);
+  for (const c of cats) {
+    const b = document.createElement('button');
+    b.textContent = c.label;
+    b.className = (App.marketCat === c.key || (!App.marketCat && c.key === 'all')) ? 'on' : '';
+    b.addEventListener('click', () => {
+      App.marketCat = c.key;
+      renderMarketCats();
+      renderMarketList();
+    });
+    box.appendChild(b);
+  }
+}
+
+const MK_CATS = [
+  { key: 'official', label: '官方' },
+  { key: 'speech', label: '口播字幕' },
+  { key: 'data', label: '数据榜单' },
+  { key: 'intro', label: '片头片尾' },
+  { key: 'product', label: '产品演示' },
+  { key: 'other', label: '其它' },
+];
+
+function renderMarketList() {
+  const box = $('mktList');
+  if (!box || !App.market) return;
+  const q = $('mktQuery') ? $('mktQuery').value.trim() : '';
+  const sort = $('mktSort') ? $('mktSort').value : 'updated';
+  const list = App.market.list({ q, sort, category: App.marketCat || 'all' });
+
+  box.innerHTML = '';
+  if (!list.length) {
+    const d = document.createElement('div');
+    d.style.cssText = 'padding:24px 16px;color:var(--muted);font-size:12px;text-align:center';
+    d.textContent = q ? `没有匹配「${q}」的模板` : '这里还没有模板，点「发布」把当前工程发上去';
+    box.appendChild(d);
+    return;
+  }
+
+  for (const t of list) {
+    const row = document.createElement('div');
+    row.className = 'mkt-item' + (t.id === App.selectedTemplateId ? ' sel' : '');
+    row.addEventListener('click', () => {
+      App.selectedTemplateId = t.id;
+      renderMarketList();
+      renderMarketDetail(t.id);
+    });
+
+    const cover = document.createElement('div');
+    cover.className = 'mkt-cover';
+    cover.textContent = MK_ICON[t.category] || '◆';
+    row.appendChild(cover);
+
+    const meta = document.createElement('div');
+    meta.className = 'mkt-meta';
+    const can = App.market.canUse(t.id);
+    const locked = !can.ok;
+    meta.innerHTML =
+      `<div class="mkt-name">${esc(t.name)}</div>` +
+      `<div class="mkt-sub">${esc(t.author)} · v${t.version}${locked ? ' · 🔒' : ''}</div>` +
+      `<div class="mkt-stats">` +
+      `<span>⬇ ${t.stats.downloads}</span>` +
+      `<span>♥ ${t.stats.likes}</span>` +
+      `<span>★ ${t.avgRating ? t.avgRating.toFixed(1) : '—'}</span>` +
+      (t.isFree ? '' : `<span>售 ${t.stats.sales}</span>`) +
+      `</div>`;
+    row.appendChild(meta);
+
+    const price = document.createElement('div');
+    price.className = 'mkt-price' + (t.isFree ? ' free' : '');
+    price.textContent = t.isFree ? '免费' : `¥${(t.price / 100).toFixed(2)}`;
+    row.appendChild(price);
+
+    box.appendChild(row);
+  }
+}
+
+const MK_ICON = { official: '★', speech: '💬', data: '📊', intro: '🎬', product: '📦', other: '◆' };
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function renderMarketDetail(id) {
+  const box = $('mktDetail');
+  if (!box || !App.market) return;
+  box.innerHTML = '';
+  const t = App.market.get(id);
+  if (!t) return;
+
+  const h = document.createElement('h5');
+  h.textContent = `${t.name} v${t.version}`;
+  box.appendChild(h);
+
+  const desc = document.createElement('div');
+  desc.className = 'lbl';
+  desc.style.marginBottom = '5px';
+  desc.textContent = t.description || '（没有写说明）';
+  box.appendChild(desc);
+
+  // 参数区：这就是「一键 Remix」的关键
+  const ps = t.params ? APP_BATCH.ParamSet.fromJSON(t.params) : null;
+  if (ps && ps.params.length) {
+    const tt = document.createElement('div');
+    tt.className = 'lbl';
+    tt.textContent = '可调参数（改完点 Remix 直接出片）';
+    box.appendChild(tt);
+    for (const p of ps.exposed()) {
+      const row = document.createElement('div');
+      row.className = 'param';
+      const lb = document.createElement('label');
+      lb.textContent = p.label;
+      row.appendChild(lb);
+      let input;
+      if (p.type === 'bool') {
+        input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = !!p.value;
+      } else if (p.type === 'select' && p.options) {
+        input = document.createElement('select');
+        for (const o of p.options) {
+          const op = document.createElement('option');
+          op.value = o[0] ?? o;
+          op.textContent = o[1] ?? String(o);
+          input.appendChild(op);
+        }
+        input.value = p.value;
+      } else {
+        input = document.createElement('input');
+        input.type = p.type === 'color' ? 'color' : 'text';
+        input.value = p.value == null ? '' : String(p.value);
+      }
+      input.dataset.pkey = p.key;
+      row.appendChild(input);
+      box.appendChild(row);
+    }
+  }
+
+  // 版本历史
+  const vs = App.market.versionsOf(t.id);
+  if (vs.length) {
+    const vd = document.createElement('div');
+    vd.className = 'versions';
+    vd.innerHTML = '版本：' + vs.map(v =>
+      `<span class="ver-tag" data-ver="${esc(v.version)}">${esc(v.version)}</span>`).join('');
+    box.appendChild(vd);
+    vd.querySelectorAll('.ver-tag').forEach(el => {
+      el.style.cursor = 'pointer';
+      el.title = '点击切到这个版本';
+      el.addEventListener('click', () => {
+        App.market.get(t.id).version = el.dataset.ver;
+        const v = App.market.getVersion(t.id, el.dataset.ver);
+        if (v) { App.market.get(t.id).ir = v.ir; App.market.get(t.id).params = v.params; }
+        renderMarketDetail(t.id);
+        renderMarketList();
+        toast(`已切到 v${el.dataset.ver}`);
+      });
+    });
+  }
+
+  // 操作
+  const acts = document.createElement('div');
+  acts.className = 'row';
+  acts.style.marginTop = '7px';
+  const can = App.market.canUse(t.id);
+
+  const mkBtn = (label, cls, fn) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (cls) b.className = cls;
+    b.addEventListener('click', fn);
+    acts.appendChild(b);
+    return b;
+  };
+
+  mkBtn('♥ 喜欢', '', () => { App.market.like(t.id); renderMarketList(); });
+  mkBtn('☆ 评分', '', () => {
+    const s = prompt('打几分（1~5）？', '5');
+    if (s) { App.market.rate(t.id, Number(s)); renderMarketList(); }
+  });
+  if (!t.isFree && can.reason === 'paid') {
+    mkBtn(`购买 ¥${(t.price / 100).toFixed(2)}`, 'primary', () => {
+      const r = App.market.purchase(t.id);
+      toast(`已购买，作者分成 ¥${((r.share || 0) / 100).toFixed(2)}`, 'ok');
+      renderMarketDetail(t.id);
+      renderMarketList();
+    });
+  }
+  mkBtn(can.ok ? 'Remix 载入' : '🔒 需购买', can.ok ? 'primary' : '', () => {
+    if (!can.ok) { toast(can.reason === 'paid' ? '这是付费模板，请先购买' : '无法使用该模板', 'warn'); return; }
+    remixTemplate(t);
+  });
+  box.appendChild(acts);
+}
+
+/** 一键 Remix：读参数 → 装入工程 */
+function remixTemplate(t) {
+  const overrides = {};
+  const box = $('mktDetail');
+  if (box) {
+    box.querySelectorAll('[data-pkey]').forEach(inp => {
+      const key = inp.dataset.pkey;
+      overrides[key] = inp.type === 'checkbox' ? inp.checked
+        : inp.type === 'number' ? Number(inp.value)
+        : inp.value;
+    });
+  }
+  pushUndo();
+  try {
+    App.ir = t.instantiate(overrides);
+    App.title = `${t.name} v${t.version}`;
+    App.audioSource = UnifiedAudio.synth({ bpm: App.ir.project.bpm || 120, duration: App.ir.project.duration });
+    App.audioSource.setNominalDuration(App.ir.project.duration);
+    App.layerId = App.ir.layers[1] ? App.ir.layers[1].id : App.ir.layers[0].id;
+    BV.S.ir = App.ir; BV.S.layerId = App.layerId;
+    if (App.sceneTree) App.sceneTree.syncFromLayers(App.ir.layers);
+    if (App.repo) App.repo.commit(App.ir, `Remix「${t.name}」v${t.version}`, { author: '我' });
+    syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector();
+    renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
+    App.market.download(t.id);
+    toast(`已载入「${t.name}」—— 改坏了也不怕，模板原版还在`, 'ok', 3200);
+  } catch (e) {
+    toast('载入失败：' + e.message, 'err');
+  }
+}
+
+function publishCurrent() {
+  const ps = APP_BATCH.ParamSet.fromJSON({
+    params: Object.keys(App.ir.layers[0].props || {})
+      .filter(k => typeof App.ir.layers[0].props[k] === 'string' || typeof App.ir.layers[0].props[k] === 'number')
+      .map((k, i) => ({ key: k, label: k, type: typeof App.ir.layers[0].props[k] === 'number' ? 'num' : 'text', value: App.ir.layers[0].props[k], group: '图层' })),
+    locked: [],
+  });
+  const meta = {
+    name: `我的模板 ${new Date().toLocaleDateString('zh-CN')}`,
+    author: '我',
+    category: App.marketCat && App.marketCat !== 'all' ? App.marketCat : 'official',
+    version: '1.0.0',
+    description: `来自工程「${App.ir.project.name}」`,
+    tags: ['自建'],
+    price: 0,
+    params: ps.toJSON(),
+  };
+  try {
+    const t = App.market.publish(App.ir, meta);
+    App.selectedTemplateId = t.id;
+    if (App.repo) App.repo.commit(App.ir, `发布模板「${t.name}」`, { author: '我' });
+    renderMarketList(); renderMarketDetail(t.id);
+    toast(`已发布「${t.name}」（免费，可改价上架）`, 'ok');
+  } catch (e) {
+    toast('发布失败：' + e.message, 'err', 4000);
+  }
+}
+
+/* ============================================================
+   V3/V4 · 版本与协作
+   ============================================================ */
+function initVersioning() {
+  App.repo = new Repo();
+  App.repo.init(App.ir, { message: '初始版本', author: '我' });
+  renderGitLog();
+
+  const file = $('gitFile');
+  if (file) file.addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      App.repo = Repo.fromJSON(JSON.parse(await f.text()));
+      App.selectedRevisionId = App.repo.head(App.repo.currentBranch);
+      renderGitLog();
+      toast('版本库已导入', 'ok');
+    } catch (err) {
+      toast('版本库导入失败：' + err.message, 'err');
+    }
+    e.target.value = '';
+  });
+}
+
+function gitCommit() {
+  const input = el2('input', {
+    placeholder: '这次改了什么？',
+    style: 'width:100%;padding:7px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px',
+  });
+  showModal('提交改动', [
+    el2('p', { class: 'lbl' }, '版本是不可变的 —— 提交后随时能回到任意一点，出了问题也不怕。'),
+    input,
+  ], [
+    { label: '取消', cls: '' },
+    {
+      label: '提交', cls: 'primary', onClick: () => {
+        closeModal();
+        const r = App.repo.commit(App.ir, input.value.trim() || '未命名改动', { author: '我' });
+        App.selectedRevisionId = r.id;
+        renderGitLog();
+        toast(`已提交 ${r.shortHash}`, 'ok');
+      },
+    },
+  ]);
+  setTimeout(() => input.focus(), 60);
+}
+
+function renderGitLog() {
+  const box = $('gitLog');
+  if (!box || !App.repo) return;
+
+  // 分支下拉
+  const br = $('gitBranch');
+  if (br) {
+    br.innerHTML = '';
+    for (const name of App.repo.listBranches()) {
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name + (name === App.repo.currentBranch ? '（当前）' : '');
+      br.appendChild(o);
+    }
+    br.value = App.repo.currentBranch;
+  }
+
+  box.innerHTML = '';
+  const head = App.repo.head(App.repo.currentBranch);
+  const items = [];
+
+  // 先列其它分支（可合并进来）
+  for (const name of App.repo.listBranches()) {
+    if (name === App.repo.currentBranch) continue;
+    items.push({ branch: name });
+  }
+
+  for (const r of App.repo.log()) {
+    const row = document.createElement('div');
+    row.className = 'git-item' + (r.id === head ? ' is-head ' : '') + (r.id === App.selectedRevisionId ? ' sel' : '');
+    row.innerHTML =
+      `<span class="hash">${esc(r.shortHash)}</span>` +
+      `<span class="msg">${esc(r.message)}` +
+      (r.tags.length ? `<span class="tags">${r.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</span>` : '') +
+      `</span>` +
+      `<span class="meta">${esc(r.author)}<br>${r.stats.blocks || 0} 块</span>`;
+    row.addEventListener('click', () => {
+      App.selectedRevisionId = r.id;
+      renderGitLog();
+      const box2 = $('gitMerge');
+      if (box2) {
+        box2.innerHTML = '';
+        const d = el2('div', {}, [
+          el2('div', {}, `已选中 ${r.shortHash}（${r.message}）`),
+          el2('div', { class: 'lbl' }, '「载入到当前工程」会用这个版本覆盖画布（可撤销）'),
+          el2('button', {
+            style: 'margin-top:5px',
+            onClick: () => {
+              pushUndo();
+              App.ir = clone(r.ir);
+              BV.S.ir = App.ir;
+              App.layerId = App.ir.layers[0].id; BV.S.layerId = App.layerId;
+              if (App.sceneTree) App.sceneTree.syncFromLayers(App.ir.layers);
+              if (App.audioSource) App.audioSource.setNominalDuration(App.ir.project.duration);
+              syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector();
+              renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
+              toast(`已载入 ${r.shortHash}`, 'ok');
+            },
+          }, '载入到当前工程'),
+        ]);
+        box2.appendChild(d);
+      }
+    });
+    box.appendChild(row);
+  }
+
+  // 分支行 + 合并按钮
+  for (const it of items) {
+    const row = document.createElement('div');
+    row.className = 'git-item';
+    row.innerHTML = `<span class="hash">⑂</span><span class="msg">分支 ${esc(it.branch)}</span><span class="meta"></span>`;
+    const b = document.createElement('button');
+    b.textContent = '合并';
+    b.className = 'primary';
+    b.style.fontSize = '10px';
+    b.addEventListener('click', (e) => { e.stopPropagation(); gitMerge(it.branch); });
+    row.appendChild(b);
+    box.insertBefore(row, box.firstChild);
+  }
+}
+
+function gitCheckout() {
+  const name = $('gitBranch') ? $('gitBranch').value : null;
+  if (!name) return;
+  try {
+    App.repo.checkout(name);
+    renderGitLog();
+    toast(`已切到分支「${name}」`, 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function gitNewBranch() {
+  const name = prompt('新分支名', '实验');
+  if (!name) return;
+  try {
+    App.repo.branch_(name);
+    App.repo.checkout(name);
+    renderGitLog();
+    toast(`已创建并切到「${name}」`, 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function gitTag() {
+  const name = prompt('标签名', `v${(App.repo.log().length + 1) / 10}`);
+  if (!name) return;
+  try {
+    App.repo.tag(name, App.repo.head(App.repo.currentBranch));
+    renderGitLog();
+    toast(`已打标签「${name}」`, 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+function gitMerge(branchName) {
+  const r = App.repo.merge(branchName, { author: '我' });
+  App.gitMergeInfo = r;
+  renderGitLog();
+  const box = $('gitMerge');
+  if (!box) return;
+  box.innerHTML = '';
+
+  if (r.ok) {
+    const okd = el2('div', { class: 'ok', style: 'color:#38c98b' },
+      `✓ 已合并「${branchName}」，生成 ${r.revision.shortHash}`);
+    box.appendChild(okd);
+    for (const c of (r.taken || []).slice(0, 8)) {
+      box.appendChild(el2('div', { class: 'taken' }, '· ' + c.msg));
+    }
+    if (r.conflicts && r.conflicts.length) {
+      box.appendChild(el2('div', { class: 'warn', style: 'color:#ffd166;margin-top:4px' },
+        `但有 ${r.conflicts.length} 处冲突，已保留你的版本：`));
+      for (const c of r.conflicts) box.appendChild(el2('div', { class: 'conflict' }, '✕ ' + c.msg));
+    }
+    toast('合并完成', 'ok');
+    return;
+  }
+
+  box.appendChild(el2('div', { class: 'conflict', style: 'font-weight:600' },
+    `合并「${branchName}」有 ${r.conflicts.length} 处冲突，需要你决定：`));
+  for (const c of r.conflicts) {
+    box.appendChild(el2('div', { class: 'conflict' }, '✕ ' + c.msg));
+  }
+  const row = el2('div', { class: 'row', style: 'margin-top:6px' }, [
+    el2('button', {
+      onClick: () => { closeModal(); toast('已取消合并'); },
+    }, '放弃'),
+    el2('button', {
+      class: 'primary',
+      onClick: () => {
+        const r2 = App.repo.merge(branchName, { force: true, author: '我' });
+        if (r2.ok) {
+          box.innerHTML = '';
+          box.appendChild(el2('div', { class: 'ok', style: 'color:#38c98b' }, `✓ 已强制合并，生成 ${r2.revision.shortHash}`));
+          renderGitLog();
+          toast('已按你的版本合并', 'ok');
+        }
+      },
+    }, '保留我的版本强行合并'),
+  ]);
+  box.appendChild(row);
+}
+
+function gitExport() {
+  EX.download(new Blob([JSON.stringify(App.repo.toJSON(), null, 2)], { type: 'application/json' }),
+    `版本库-${App.ir.project.name}.json`);
+  toast('版本库已导出', 'ok');
+}
+
+function gitPatch() {
+  const log = App.repo.log();
+  if (log.length < 2) { toast('至少要两个版本才能看差异', 'warn'); return;
+  }
+  const prev = log[1], cur = log[0];
+  const text = App.repo.patch(prev.id, cur.id);
+  showModal('版本差异', [
+    el2('pre', {
+      style: 'white-space:pre-wrap;font-size:11px;line-height:1.7;margin:0;color:var(--fg)',
+    }, text),
+  ], [
+    { label: '关闭', cls: '' },
+    {
+      label: '复制', cls: 'primary', onClick: async () => {
+        try { await navigator.clipboard.writeText(text); toast('已复制到剪贴板', 'ok'); }
+        catch { toast('复制失败，请手动选中复制', 'warn'); }
+      },
+    },
+  ]);
+}
+
+/* ============================================================
+   V3/V4 · AI 辅助
+   ============================================================ */
+function aiParse() {
+  const inp = $('aiNlInput');
+  const out = $('aiNlResult');
+  if (!inp || !out) return;
+  const text = inp.value.trim();
+  if (!text) { toast('先说点什么吧', 'warn'); return; }
+
+  const p = new AI.NLParser({
+    layers: App.ir.layers.map(l => l.name),
+    markers: (App.ir.markers || []).map(m => m.name),
+  });
+  const r = p.parse(text);
+  if (!r.actions.length) {
+    out.innerHTML = '';
+    out.appendChild(el2('div', { class: 'err' }, '没解析出任何动作。试试更具体的说法，例如「让标题逐字弹入，延迟 0.05 秒」。'));
+    return;
+  }
+
+  out.innerHTML = '';
+  out.appendChild(el2('h6', {}, `识别出 ${r.actions.length} 个动作：`));
+  for (const a of r.actions) {
+    const def = a.op;
+    out.appendChild(el2('div', { class: 'line' }, [
+      el2('span', { class: 'op' }, def),
+      el2('span', {}, a.why),
+    ]));
+  }
+  if (r.warnings.length) {
+    out.appendChild(el2('h6', {}, '没听懂的片段：'));
+    for (const w of r.warnings) out.appendChild(el2('div', { class: 'warn' }, '· ' + w));
+  }
+
+  // 预览编译结果
+  const compiled = AI.actionsToBlocks(r.actions);
+  if (compiled.skipped.length) {
+    out.appendChild(el2('h6', {}, '无法转换的部分：'));
+    for (const s of compiled.skipped) {
+      out.appendChild(el2('div', { class: 'warn' }, `· ${s.op}：${s.reason}`));
+    }
+  }
+
+  const apply = el2('button', {
+    class: 'primary',
+    style: 'margin-top:8px;align-self:flex-start',
+    onClick: () => {
+      const layer = currentLayer();
+      if (!layer) { toast('没有可用图层', 'warn'); return; }
+      pushUndo();
+      layer.blocks = (layer.blocks || []).concat(clone(compiled.blocks));
+      if (App.repo) App.repo.commit(App.ir, `AI 生成：${r.actions.map(a => a.op).join('、')}`, { author: '我' });
+      BV.renderBlocks(); drawFrame(); renderInspector();
+      toast(`已把 ${compiled.blocks.length} 个积木加到「${layer.name}」`, 'ok');
+    },
+  }, `应用到「${currentLayer() ? currentLayer().name : '图层'}」`);
+  out.appendChild(apply);
+}
+
+function aiStoryboard() {
+  const inp = $('aiScriptInput');
+  const out = $('aiScriptResult');
+  if (!inp || !out) return;
+  const text = inp.value.trim();
+  if (!text) { toast('先粘贴一段文案', 'warn'); return; }
+
+  const sb = AI.scriptToStoryboard(text);
+  out.innerHTML = '';
+  out.appendChild(el2('h6', {}, `拆成 ${sb.scenes.length} 个场景，共 ${sb.totalDuration}s / ${sb.wordCount} 字`));
+  for (const s of sb.scenes) {
+    out.appendChild(el2('div', { class: 'scene' }, [
+      el2('div', { class: 't' }, `SC${s.index + 1}　${s.text}`),
+      el2('div', { class: 'meta' },
+        `${s.start}s → ${s.end}s（${s.duration}s）　建议：${s.suggested.op}　${s.suggested.reason}`),
+    ]));
+  }
+}
+
+function aiStoryboardApply() {
+  const inp = $('aiScriptInput');
+  if (!inp || !inp.value.trim()) { toast('先粘贴一段文案', 'warn'); return; }
+  const sb = AI.scriptToStoryboard(inp.value.trim());
+
+  // 用分镜生成一个真实工程：每个场景一个文字图层，按建议的动效入场
+  pushUndo();
+  const W = 1080, H = 1920;
+  const ir = IR_MOD.defaultProject('分镜');
+  ir.project.width = W; ir.project.height = H;
+  ir.project.duration = Math.max(1, Math.ceil(sb.totalDuration));
+  ir.project.fps = 30;
+  ir.markers = sb.scenes.flatMap(s => s.markers);
+  ir.layers = [];
+
+  // 背景
+  ir.layers.push(IR_MOD.newLayer('背景', 'rect'));
+  ir.layers[0].props = Object.assign(ir.layers[0].props, { x: W / 2, y: H / 2, w: W, h: H, fill: '#0d1017' });
+
+  for (const s of sb.scenes) {
+    const l = IR_MOD.newLayer(`SC${s.index + 1}`, 'text');
+    l.props = Object.assign({}, l.props, {
+      x: W / 2, y: H / 2, w: W * 0.86, h: 200,
+      text: s.text, fontSize: s.subtitleText[0] ? Math.min(96, Math.round(120 / Math.max(1, [...s.subtitleText[0]].length / 8))) : 72,
+      fontWeight: 700, fill: '#ffffff', align: 'center',
+    });
+    // 用建议的动效
+    const act = { op: s.suggested.op, slots: { layer: IR_MOD.SEL(l.name) } };
+    const compiled = AI.actionsToBlocks([act]);
+    if (compiled.blocks.length) {
+      const b = compiled.blocks[0];
+      // 覆盖成这个场景自己的时间
+      if (b.op === 'fadeIn' || b.op === 'fadeOut') {
+        b.slots[1].value = IR_MOD.TIME(Math.min(0.8, s.duration * 0.4));
+        b.slots[2].value = IR_MOD.TIME(s.start);
+      } else if (b.op === 'charPopIn') {
+        b.slots[1].value = IR_MOD.TIME(s.start);
+        b.slots[2].value = IR_MOD.NUM(Math.max(0.02, Math.min(0.12, s.duration / Math.max(1, [...s.text].length) * 0.6)));
+      } else if (b.op === 'typewriter') {
+        b.slots[1].value = IR_MOD.NUM(Math.max(4, Math.round([...s.text].length / s.duration)));
+        b.slots[2].value = IR_MOD.TIME(s.start);
+      } else {
+        // 其它动效统一用「在时间点 + 淡入」
+        b.op = 'setAt';
+        b.slots = [{ type: 'time', value: IR_MOD.TIME(s.start) }, { type: 'blocks', value: [
+          { id: IR_MOD.uid('B'), k: 'C', op: 'fadeIn', slots: [
+            { type: 'sel', value: IR_MOD.SEL(l.name) },
+            { type: 'time', value: IR_MOD.TIME(Math.min(0.8, s.duration * 0.4)) },
+            { type: 'time', value: IR_MOD.TIME(0) },
+          ] },
+        ] }];
+      }
+      l.blocks = [b];
+    }
+    ir.layers.push(l);
+  }
+
+  // 顺便把字幕轨也建好
+  const sub = new SUB_EXPORTS.SubtitleTrack({ name: '自动字幕' });
+  for (const s of sb.scenes) {
+    for (const line of s.subtitleText) {
+      sub.add(new SUB_EXPORTS.SubtitleCue({
+        start: s.start, end: Math.min(ir.project.duration, s.end), text: line, styleId: 'default',
+      }));
+    }
+  }
+
+  App.ir = ir;
+  App.title = 'AI 分镜';
+  App.layerId = ir.layers[1] ? ir.layers[1].id : ir.layers[0].id;
+  BV.S.ir = ir; BV.S.layerId = App.layerId;
+  if (App.sceneTree) App.sceneTree.syncFromLayers(ir.layers);
+  if (App.audioSource) { App.audioSource.setNominalDuration(ir.project.duration); }
+  App.subPanel.setTrack(sub);
+  App.subPanel.setDuration(ir.project.duration);
+  App.ir.subtitles = App.subPanel.toJSON();
+  if (App.repo) App.repo.commit(ir, `AI 分镜：${sb.scenes.length} 个场景`, { author: '我' });
+  syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector();
+  renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
+  toast(`已生成 ${sb.scenes.length} 个场景的分镜工程（竖屏 + 自动字幕）`, 'ok', 3600);
+}
+
+function aiFromSubs() {
+  const track = App.subPanel.track;
+  if (!track.cues.length) { toast('先在「字幕」页导入或新增字幕', 'warn'); return; }
+  const r = AI.subtitlesToBlocks(track, { layer: currentLayer() ? currentLayer().name : '标题文字' });
+  const out = $('aiSubResult');
+  if (out) {
+    out.innerHTML = '';
+    out.appendChild(el2('h6', {}, `生成 ${r.blocks.length} 个积木、${r.markers.length} 个标记点`));
+    for (const a of r.actions) {
+      out.appendChild(el2('div', { class: 'line' }, [
+        el2('span', { class: 'op' }, a.op),
+        el2('span', {}, a.why),
+      ]));
+    }
+  }
+  // 标记点也写进工程
+  App.ir.markers = (App.ir.markers || []).concat(r.markers.map(m => ({ name: m.name, time: m.time, label: m.label })));
+  buildRuler();
+  if (App.repo) App.repo.commit(App.ir, `按字幕生成 ${r.blocks.length} 个动画`, { author: '我' });
+  toast(`已生成 ${r.blocks.length} 个积木与 ${r.markers.length} 个标记点`, 'ok');
+}
+
+function aiExplainLayer() {
+  const layer = currentLayer();
+  const out = $('aiReadResult');
+  if (!layer || !out) { toast('没有选中的图层', 'warn'); return; }
+  const lines = AI.explainLayer(layer);
+  out.innerHTML = '';
+  out.appendChild(el2('h6', {}, `图层「${layer.name}」的逻辑：`));
+  if (!lines.length) {
+    out.appendChild(el2('div', { class: 'lbl' }, '（这个图层没有积木，是静态的）'));
+  } else {
+    lines.forEach((l, i) => out.appendChild(el2('div', { class: 'line' }, `${i + 1}. ${l}`)));
+  }
+}
+
+function aiInfer() {
+  const layer = currentLayer();
+  const out = $('aiReadResult');
+  if (!layer || !out) { toast('没有选中的图层', 'warn'); return; }
+  try {
+    const r = AI.inferEffectFromFrames(App.ir, layer.id, App.audioSource || App.audio, { window: Math.min(4, App.ir.project.duration) });
+    out.innerHTML = '';
+    out.appendChild(el2('h6', {}, `采样 ${r.series.length} 帧，时间窗 ${r.startTime}s 起约 ${r.duration}s`));
+    out.appendChild(el2('div', { class: 'ok' },
+      `最可能：${r.best.effect}（置信度 ${(r.best.confidence * 100).toFixed(0)}%）`));
+    out.appendChild(el2('div', { class: 'why' }, '依据：' + r.best.evidence));
+    if (r.guesses.length > 1) {
+      out.appendChild(el2('h6', {}, '其它可能：'));
+      for (const g of r.guesses.slice(1)) {
+        out.appendChild(el2('div', { class: 'line why' }, `${g.effect}（${(g.confidence * 100).toFixed(0)}%）— ${g.evidence}`));
+      }
+    }
+    const add = el2('button', {
+      style: 'margin-top:8px;align-self:flex-start',
+      onClick: () => {
+        const spec = r.best;
+        if (spec.effect === 'none') { toast('没测出动效', 'warn'); return; }
+        pushUndo();
+        const act = { op: spec.effect, slots: { layer: IR_MOD.SEL(layer.name) } };
+        const c = AI.actionsToBlocks([act]);
+        if (!c.blocks.length) { toast('该动效无法自动生成', 'warn'); return; }
+        layer.blocks = (layer.blocks || []).concat(c.blocks);
+        BV.renderBlocks(); drawFrame();
+        toast(`已按推断结果加上「${spec.effect}」`, 'ok');
+      },
+    }, '把推断结果加成积木');
+    out.appendChild(add);
+  } catch (e) {
+    out.innerHTML = '';
+    out.appendChild(el2('div', { class: 'err' }, '推断失败：' + e.message));
+  }
+}
+
+function aiLint() {
+  const issues = AI.lintProject(App.ir, App.audioSource || App.audio);
+  const out = $('aiLintResult');
+  if (!out) return;
+  out.innerHTML = '';
+  if (!issues.length) {
+    out.appendChild(el2('div', { class: 'ok' }, '✓ 体检通过，没发现明显问题'));
+    return;
+  }
+  const errs = issues.filter(i => i.level === 'error');
+  const warns = issues.filter(i => i.level === 'warn');
+  const infos = issues.filter(i => i.level === 'info');
+  out.appendChild(el2('div', {}, `${errs.length} 个错误 · ${warns.length} 个提醒 · ${infos.length} 条建议`));
+  for (const i of issues) {
+    const cls = i.level === 'error' ? 'err' : i.level === 'warn' ? 'warn' : 'lbl';
+    const icon = i.level === 'error' ? '✕' : i.level === 'warn' ? '⚠' : '·';
+    const line = el2('div', { class: `line ${cls}` }, `${icon} ${i.msg}`);
+    if (i.fix) {
+      const b = el2('button', { style: 'margin-left:6px;font-size:10px;padding:1px 6px' }, '怎么办');
+      b.addEventListener('click', () => toast(i.fix, '', 4000));
+      line.appendChild(b);
+    }
+    out.appendChild(line);
+  }
+}
+
+function aiExplainAll() {
+  const lines = AI.explainProject(App.ir);
+  showModal('这个工程在做什么', [
+    el2('div', { style: 'font-size:12px;line-height:2' },
+      lines.map(l => el2('div', { style: 'margin:4px 0' }, l))),
+  ], [{ label: '知道了', cls: '' }]);
 }
 
 /** 有真实音频时用真实音源，否则用合成音源 */
@@ -1957,12 +2793,12 @@ function bindGlobal() {
 
   /* 标签页 */
   document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    document.querySelectorAll('.tab-page').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    $('tab-' + t.dataset.tab).classList.add('active');
-    if (t.dataset.tab === 'blocks') setTimeout(() => BV.renderBlocks(), 0);
-    if (t.dataset.tab === 'inspector') renderInspector();
+    switchTab(t.dataset.tab);
+  }));
+
+  /* AI 子标签 */
+  document.querySelectorAll('.ai-tab').forEach(t => t.addEventListener('click', () => {
+    switchAiTab(t.dataset.ai);
   }));
 
   /* 画布预设 / fps / 缩放 / 时长 */
@@ -2115,6 +2951,30 @@ function doAction(act) {
     case 'batch.pause': App.dataPanel.pause(); break;
     case 'batch.zip': batchZip(); break;
 
+    /* ---------- V3/V4：市场 ---------- */
+    case 'mkt.publish': publishCurrent(); break;
+    case 'mkt.import': $('mktFile').click(); break;
+
+    /* ---------- V3/V4：AI ---------- */
+    case 'ai.parse': aiParse(); break;
+    case 'ai.storyboard': aiStoryboard(); break;
+    case 'ai.storyboardApply': aiStoryboardApply(); break;
+    case 'ai.fromSubs': aiFromSubs(); break;
+    case 'ai.explainLayer': aiExplainLayer(); break;
+    case 'ai.explainAll': aiExplainAll(); break;
+    case 'ai.infer': aiInfer(); break;
+    case 'ai.lint': aiLint(); break;
+
+    /* ---------- V3/V4：版本 ---------- */
+    case 'git.commit': gitCommit(); break;
+    case 'git.branch': gitNewBranch(); break;
+    case 'git.checkout': gitCheckout(); break;
+    case 'git.tag': gitTag(); break;
+    case 'git.export': gitExport(); break;
+    case 'git.import': $('gitFile').click(); break;
+    case 'git.patch': gitPatch(); break;
+    case 'git.merge': gitMerge(App.gitMergeBranch || 'feature'); break;
+
     case 'tpl.open': loadTplDialog(); break;
     case 'debug.panel': toggleDebugPanel(); updateDebugPanels(); break;
     case 'dbg.stepIn': debuggerStep(); break;
@@ -2140,6 +3000,14 @@ function switchTab(name) {
   if (name === 'subtitle') { App.subPanel.render(); App.subPanel.validate(); }
   if (name === 'audio') { App.audioDesk.render(); renderAudioStatus(); }
   if (name === 'data') App.dataPanel.renderBindings();
+  if (name === 'market') { renderMarketList(); renderMarketDetail(App.selectedTemplateId); }
+  if (name === 'git') renderGitLog();
+}
+
+/** AI 面板内部的子页签 */
+function switchAiTab(name) {
+  document.querySelectorAll('.ai-tab').forEach(x => x.classList.toggle('active', x.dataset.ai === name));
+  document.querySelectorAll('.ai-pane').forEach(x => x.classList.toggle('active', x.dataset.aiPane === name));
 }
 function focusLeft() {
   $('leftPanel').scrollIntoView();
@@ -2450,5 +3318,152 @@ window.BlockAnim = {
   async capabilities() {
     if (!App.caps) App.caps = await detectCapabilities();
     return App.caps;
+  },
+
+  /* ---------- V3/V4 自动化 API ---------- */
+  market() {
+    return {
+      count: App.market.list().length,
+      templates: App.market.list().map(t => ({
+        id: t.id, name: t.name, author: t.author, version: t.version,
+        category: t.category, price: t.price, free: t.isFree,
+        downloads: t.stats.downloads, likes: t.stats.likes,
+        rating: Math.round(t.avgRating * 10) / 10, sales: t.stats.sales,
+      })),
+      owned: App.market.owned().map(t => t.name),
+      earnings: App.market.earnings(App.market.currentUser),
+    };
+  },
+  publishTemplate(meta) {
+    const t = App.market.publish(App.ir, Object.assign({
+      name: '未命名模板', author: App.market.currentUser, version: '1.0.0',
+    }, meta || {}));
+    renderMarketList();
+    return { id: t.id, name: t.name, version: t.version };
+  },
+  remixTemplate(id, overrides) {
+    const t = App.market.get(id);
+    if (!t) throw new Error('模板不存在');
+    const can = App.market.canUse(id);
+    if (!can.ok) throw new Error(can.reason === 'paid' ? '付费模板需先购买' : '无法使用');
+    remixTemplate(t, overrides || {});
+    return App.ir.project.name;
+  },
+
+  /* AI */
+  aiParse(text) {
+    const p = new AI.NLParser({
+      layers: App.ir.layers.map(l => l.name),
+      markers: (App.ir.markers || []).map(m => m.name),
+    });
+    const r = p.parse(text || '');
+    const c = AI.actionsToBlocks(r.actions);
+    return {
+      actions: r.actions.map(a => ({ op: a.op, why: a.why })),
+      warnings: r.warnings,
+      blockCount: c.blocks.length,
+      skipped: c.skipped.map(s => ({ op: s.op, reason: s.reason })),
+      blocks: c.blocks,
+    };
+  },
+  aiBlocksToIR(blocks, layerName) {
+    const layer = App.ir.layers.find(l => l.name === layerName) || currentLayer();
+    if (!layer) throw new Error('找不到图层');
+    layer.blocks = clone(blocks);
+    if (App.repo) App.repo.commit(App.ir, 'AI 生成积木', { author: '我' });
+    BV.renderBlocks(); drawFrame();
+    return layer.blocks.length;
+  },
+  aiStoryboard(text) {
+    const sb = AI.scriptToStoryboard(text || '');
+    return {
+      sceneCount: sb.scenes.length,
+      totalDuration: sb.totalDuration,
+      wordCount: sb.wordCount,
+      scenes: sb.scenes.map(s => ({
+        text: s.text, start: s.start, end: s.end, duration: s.duration,
+        effect: s.suggested.op, reason: s.suggested.reason,
+        confidence: Math.round(s.suggested.confidence * 100),
+        subtitles: s.subtitleText,
+      })),
+    };
+  },
+  aiApplyStoryboard(text) {
+    const inp = $('aiScriptInput');
+    if (inp) inp.value = text || '';
+    aiStoryboardApply();
+    return { layers: App.ir.layers.length, duration: App.ir.project.duration };
+  },
+  aiExplain() { return AI.explainProject(App.ir); },
+  aiExplainLayer(layerName) {
+    const l = App.ir.layers.find(x => x.name === layerName) || currentLayer();
+    return l ? AI.explainLayer(l) : [];
+  },
+  aiInfer(layerName) {
+    const l = App.ir.layers.find(x => x.name === layerName) || currentLayer();
+    if (!l) throw new Error('找不到图层');
+    const r = AI.inferEffectFromFrames(App.ir, l.id, App.audioSource || App.audio, {
+      window: Math.min(4, App.ir.project.duration),
+    });
+    return { best: r.best, guesses: r.guesses, samples: r.series.length, startTime: r.startTime };
+  },
+  aiLint() {
+    return AI.lintProject(App.ir, App.audioSource || App.audio).map(i => ({
+      level: i.level, kind: i.kind, msg: i.msg, fix: i.fix,
+    }));
+  },
+
+  /* 版本 */
+  repo() {
+    return {
+      branch: App.repo.currentBranch,
+      branches: App.repo.listBranches(),
+      head: App.repo.head(App.repo.currentBranch),
+      count: App.repo.log().length,
+      log: App.repo.log().map(r => ({
+        id: r.shortHash, message: r.message, author: r.author,
+        tags: r.tags, blocks: r.stats.blocks || 0,
+      })),
+    };
+  },
+  gitCommit(message) {
+    const r = App.repo.commit(App.ir, message || '自动提交', { author: '我' });
+    renderGitLog();
+    return r.shortHash;
+  },
+  gitBranch(name, checkout = true) {
+    App.repo.branch_(name);
+    if (checkout) App.repo.checkout(name);
+    renderGitLog();
+    return App.repo.listBranches();
+  },
+  gitCheckout(name) { App.repo.checkout(name); renderGitLog(); return name; },
+  gitMerge(name, force = false) {
+    const r = App.repo.merge(name, { force, author: '我' });
+    renderGitLog();
+    return {
+      ok: r.ok,
+      conflicts: (r.conflicts || []).map(c => ({ kind: c.kind, msg: c.msg })),
+      revision: r.revision ? r.revision.shortHash : null,
+    };
+  },
+  gitTag(name) { App.repo.tag(name, App.repo.head(App.repo.currentBranch)); renderGitLog(); return name; },
+  gitDiff(a, b) {
+    const log = App.repo.log();
+    const idA = a || (log[1] && log[1].id);
+    const idB = b || (log[0] && log[0].id);
+    return App.repo.patch(idA, idB);
+  },
+
+  /* 素材库 */
+  assets(kind, query) {
+    const list = query ? App.assets.search(query, kind) : App.assets.all(kind);
+    return list.map(a => ({ kind: a.kind, key: a.key, name: a.name, license: a.license, tags: a.tags }));
+  },
+  sfx(key) {
+    const a = App.assets.get('sfx', key);
+    if (!a) throw new Error('没有这个音效：' + key);
+    const pcm = synthSfx(a.synth);
+    return { key, sampleRate: 48000, length: pcm.length, peak: Math.max(...pcm.map(Math.abs)) };
   },
 };

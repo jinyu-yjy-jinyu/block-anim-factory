@@ -1,6 +1,6 @@
 {
   "name": "block-anim-factory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "积木动画工厂 · 用积木搭动画逻辑的可视化编程动画制作软件（零构建、零依赖纯前端）",
@@ -13,6 +13,7 @@
     "test:custom": "node test-custom.mjs",
     "test:scene": "node test-scene.mjs",
     "test:node": "node test-node-batch.mjs",
+    "test:v3v4": "node test-v3v4.mjs",
     "test:pipeline": "node test-pipeline.mjs",
     "test:browser": "node test-browser.mjs",
     "test:visual": "node test-visual.mjs",

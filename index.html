@@ -7,6 +7,7 @@
 <title>积木动画工厂 · V0 原型</title>
 <link rel="stylesheet" href="src/styles.css">
 <link rel="stylesheet" href="src/panels.css">
+<link rel="stylesheet" href="src/panels-v3v4.css">
 </head>
 <body>
 
@@ -168,6 +169,9 @@
         <button class="tab" data-tab="subtitle">字幕</button>
         <button class="tab" data-tab="audio">音频</button>
         <button class="tab" data-tab="data">数据</button>
+        <button class="tab" data-tab="market">市场</button>
+        <button class="tab" data-tab="ai">AI</button>
+        <button class="tab" data-tab="git">版本</button>
       </div>
 
       <div class="tab-page active" id="tab-blocks">
@@ -303,6 +307,104 @@
           <button data-act="batch.zip">打包下载</button>
         </div>
         <div id="batchProgress" class="batch-progress"></div>
+      </div>
+
+      <!-- 市场：模板与社区 -->
+      <div class="tab-page" id="tab-market">
+        <div class="panel-head"><span>模板市场</span>
+          <div class="panel-actions">
+            <button data-act="mkt.publish" title="把当前工程发布成模板">发布</button>
+            <button data-act="mkt.import" title="导入模板包">导入</button>
+          </div>
+        </div>
+        <div class="mkt-search">
+          <input id="mktQuery" placeholder="搜索模板…" />
+          <select id="mktSort">
+            <option value="updated">最新</option>
+            <option value="downloads">最多下载</option>
+            <option value="likes">最多喜欢</option>
+            <option value="rating">评分最高</option>
+            <option value="price">价格最低</option>
+          </select>
+        </div>
+        <div id="mktCats" class="mkt-cats"></div>
+        <div id="mktList" class="scroll mkt-list"></div>
+        <div id="mktDetail" class="mkt-detail"></div>
+        <input type="file" id="mktFile" accept=".json" hidden>
+      </div>
+
+      <!-- AI 辅助 -->
+      <div class="tab-page" id="tab-ai">
+        <div class="panel-head"><span>AI 辅助</span>
+          <div class="panel-actions">
+            <button data-act="ai.explainAll" title="把整个工程说成人话">解释工程</button>
+          </div>
+        </div>
+        <div class="ai-tabs">
+          <button class="ai-tab active" data-ai="nl">说句话</button>
+          <button class="ai-tab" data-ai="script">写文案</button>
+          <button class="ai-tab" data-ai="sub">对字幕</button>
+          <button class="ai-tab" data-ai="read">读动画</button>
+          <button class="ai-tab" data-ai="lint">体检</button>
+        </div>
+
+        <div class="ai-pane active" data-ai-pane="nl">
+          <p class="lbl">用一句话描述你想要的动画，AI 会拼成积木：</p>
+          <textarea id="aiNlInput" placeholder="例：让标题逐字弹入，延迟 0.05 秒，然后副标题淡入，时长 1.5 秒"></textarea>
+          <button data-act="ai.parse" class="primary">转成积木</button>
+          <div id="aiNlResult" class="ai-result"></div>
+        </div>
+
+        <div class="ai-pane" data-ai-pane="script">
+          <p class="lbl">粘贴文案，自动拆成场景并建议动效：</p>
+          <textarea id="aiScriptInput" placeholder="例：做动画其实不用写代码。拖几个积木，动画就出来了。"></textarea>
+          <button data-act="ai.storyboard" class="primary">拆成分镜</button>
+          <button data-act="ai.storyboardApply" title="按分镜生成完整工程">生成分镜工程</button>
+          <div id="aiScriptResult" class="ai-result"></div>
+        </div>
+
+        <div class="ai-pane" data-ai-pane="sub">
+          <p class="lbl">用当前字幕轨生成对齐的文字动画（先在「字幕」页导入）：</p>
+          <button data-act="ai.fromSubs" class="primary">按字幕生成动画</button>
+          <div id="aiSubResult" class="ai-result"></div>
+        </div>
+
+        <div class="ai-pane" data-ai-pane="read">
+          <p class="lbl">把积木说成人话，或从画面反推动效：</p>
+          <button data-act="ai.explainLayer">解释当前图层</button>
+          <button data-act="ai.infer" title="采样画面变化，反推是哪种动效">从画面反推</button>
+          <div id="aiReadResult" class="ai-result"></div>
+        </div>
+
+        <div class="ai-pane" data-ai-pane="lint">
+          <p class="lbl">扫一遍工程，指出常见问题：</p>
+          <button data-act="ai.lint" class="primary">开始体检</button>
+          <div id="aiLintResult" class="ai-result"></div>
+        </div>
+      </div>
+
+      <!-- 版本与协作 -->
+      <div class="tab-page" id="tab-git">
+        <div class="panel-head"><span>版本与分支</span>
+          <div class="panel-actions">
+            <button data-act="git.commit">提交</button>
+            <button data-act="git.branch" title="从当前版本开一个分支">开分支</button>
+          </div>
+        </div>
+        <div class="git-toolbar">
+          <select id="gitBranch"></select>
+          <button data-act="git.checkout">切换</button>
+          <button data-act="git.newBranch">新建</button>
+          <button data-act="git.tag" title="给当前版本打标签">打标签</button>
+        </div>
+        <div id="gitLog" class="scroll git-log"></div>
+        <div id="gitMerge" class="git-merge"></div>
+        <div class="git-actions">
+          <button data-act="git.export" title="导出版本库（JSON）">导出版本库</button>
+          <button data-act="git.import">导入</button>
+          <button data-act="git.patch" title="生成与上一版的可读差异">看差异</button>
+        </div>
+        <input type="file" id="gitFile" accept=".json" hidden>
       </div>
     </aside>
   </main>

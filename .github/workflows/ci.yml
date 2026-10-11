@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   test:
-    name: 测试（9 套件 / 340+ 断言）
+    name: 测试（10 套件 / 430+ 断言）
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -38,6 +38,7 @@ jobs:
           node test-custom.mjs
           node test-scene.mjs
           node test-node-batch.mjs
+          node test-v3v4.mjs
           node test-pipeline.mjs
 
       # 浏览器套件在 ubuntu 上没有 Chrome，会自动跳过
@@ -154,8 +155,13 @@ jobs:
             - **逐帧一致**：预览与导出走同一个 `render()`，只差分辨率
             - **音频驱动**：录音、波形编辑、节拍检测、EBU R128 响度，画面跟着声音走
             - **字幕**：SRT / ASS / VTT 导入导出、双语、逐词高亮、爆字数告警
+            - **场景树**：嵌套组、复用实例、混合模式与遮罩
+            - **文字引擎**：可变字体、竖排、环形排版、路径文字、标点避头尾
             - **导出**：MP4（H.264）/ GIF / PNG 序列帧 / WebM
             - **数据驱动**：CSV/JSON 绑定变量，批量渲染 + 断点续渲
+            - **模板市场**：版本历史、一键 Remix、付费分成、免版权素材库
+            - **AI 辅助**：自然语言转积木、文案分镜、字幕对齐、动画反向解释
+            - **版本协作**：提交历史、分支、三方合并
 
             ### 质量
-            9 个测试套件、340+ 项断言（含真实 Chrome 端到端与像素级画面断言）在 CI 中全部通过。
+            10 个测试套件、430+ 项断言（含真实 Chrome 端到端与像素级画面断言）在 CI 中全部通过。

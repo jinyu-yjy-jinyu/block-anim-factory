@@ -248,7 +248,96 @@ await page.screenshot({ path: join(OUT, '15-场景树与实例.png') });
 await page.evaluate(() => document.querySelector('[data-act="export.frames"]').click());
 await page.waitForTimeout(600);
 await page.screenshot({ path: join(OUT, '16-导出格式.png') });
+await page.keyboard.press('Escape');
+await page.waitForTimeout(200);
+
+/* ============================================================
+   17~20 · V3/V4 新面板
+   ============================================================ */
+
+// 17. 模板市场
+await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  A.loadTemplate('popTitle');
+  await new Promise(r => setTimeout(r, 400));
+  document.querySelector('.tab[data-tab="market"]').click();
+  await new Promise(r => setTimeout(r, 200));
+  document.querySelectorAll('#mktList .mkt-item')[2].click();
+  await new Promise(r => setTimeout(r, 250));
+});
+await page.waitForTimeout(700);
+await page.screenshot({ path: join(OUT, '17-模板市场.png') });
+
+// 18. AI：用一句话搭动画
+await page.evaluate(async () => {
+  document.querySelector('.tab[data-tab="ai"]').click();
+  await new Promise(r => setTimeout(r, 150));
+  document.querySelector('[data-ai="nl"]').click();
+  document.querySelector('#aiNlInput').value =
+    '让标题逐字弹入，延迟 0.05 秒，然后副标题淡入，时长 1.5 秒，最后等 1 秒';
+  document.querySelector('[data-act="ai.parse"]').click();
+  await new Promise(r => setTimeout(r, 350));
+});
+await page.waitForTimeout(600);
+await page.screenshot({ path: join(OUT, '18-AI转积木.png') });
+
+// 19. AI：文案自动分镜（并生成了工程）
+await page.evaluate(async () => {
+  document.querySelector('[data-ai="script"]').click();
+  document.querySelector('#aiScriptInput').value =
+    '做动画，其实不用写代码。拖几个积木，动画就出来了。还能跟着音乐节奏自己动。最后一键导出视频。';
+  document.querySelector('[data-act="ai.storyboard"]').click();
+  await new Promise(r => setTimeout(r, 350));
+});
+await page.waitForTimeout(600);
+await page.screenshot({ path: join(OUT, '19-AI分镜.png') });
+
+await page.evaluate(async () => {
+  document.querySelector('[data-act="ai.storyboardApply"]').click();
+  await new Promise(r => setTimeout(r, 700));
+  document.querySelector('.tab[data-tab="blocks"]').click();
+  await new Promise(r => setTimeout(r, 200));
+  for (let i = 0; i < 100; i++) await new Promise(r => setTimeout(r, 0));
+});
+await page.waitForTimeout(900);
+await page.screenshot({ path: join(OUT, '20-AI生成的工程.png') });
+
+// 21. 版本与分支
+await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  A.gitCommit('定下标题动画');
+  A.gitBranch('文案分支');
+  await new Promise(r => setTimeout(r, 200));
+  A.gitCommit('分支：换逐字弹入');
+  A.gitCheckout('main');
+  A.gitCommit('主干：调整字号');
+  A.gitBranch('实验');
+  A.gitCheckout('main');
+  A.gitTag('v1.0');
+  document.querySelector('.tab[data-tab="git"]').click();
+  await new Promise(r => setTimeout(r, 300));
+});
+await page.waitForTimeout(700);
+await page.screenshot({ path: join(OUT, '21-版本与分支.png') });
+
+// 22. AI 反向解释 + 体检
+await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  A.loadTemplate('karaoke');
+  await new Promise(r => setTimeout(r, 400));
+  document.querySelector('.tab[data-tab="ai"]').click();
+  document.querySelector('[data-ai="read"]').click();
+  await new Promise(r => setTimeout(r, 150));
+  A.selectLayer(A.ir.layers.find(l => l.name.includes('标题'))?.id || A.ir.layers[0].id);
+  await new Promise(r => setTimeout(r, 150));
+  document.querySelector('[data-act="ai.explainLayer"]').click();
+  await new Promise(r => setTimeout(r, 200));
+  document.querySelector('[data-act="ai.infer"]').click();
+  await new Promise(r => setTimeout(r, 400));
+});
+await page.waitForTimeout(700);
+await page.screenshot({ path: join(OUT, '22-AI读动画.png') });
 
 await browser.close();
 srv.close();
-console.log('截图已输出到 screenshots/（16 张）');
+console.log('截图已输出到 screenshots/（22 张）');

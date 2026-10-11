@@ -1,0 +1,164 @@
+/* ============================================================
+   panels-v3v4.css · 市场 / AI / 版本 面板
+   ============================================================ */
+
+/* ============================================================
+   模板市场
+   ============================================================ */
+.mkt-search {
+  display: flex; gap: 5px; padding: 6px 8px;
+  border-bottom: 1px solid var(--line); background: var(--bg-2);
+}
+.mkt-search input { flex: 1; min-width: 0; font-size: 11px; }
+.mkt-search select { font-size: 11px; width: 86px; }
+
+.mkt-cats {
+  display: flex; gap: 3px; padding: 5px 8px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line);
+}
+.mkt-cats button {
+  font-size: 10px; padding: 2px 8px; border-radius: 999px;
+  background: rgba(255,255,255,.04); color: var(--muted); border-color: transparent;
+}
+.mkt-cats button.on { background: var(--accent); color: #0b0e14; font-weight: 600; }
+
+.mkt-list { flex: 1; min-height: 140px; }
+.mkt-item {
+  display: grid; grid-template-columns: 46px 1fr auto; gap: 7px; align-items: center;
+  padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,.04);
+  cursor: pointer;
+}
+.mkt-item:hover { background: rgba(255,255,255,.04); }
+.mkt-item.sel { background: rgba(74,140,255,.14); }
+
+.mkt-cover {
+  width: 46px; height: 34px; border-radius: 5px; overflow: hidden;
+  background: var(--bg-2); border: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; color: var(--muted); flex: none;
+}
+.mkt-cover img { width: 100%; height: 100%; object-fit: cover; }
+
+.mkt-meta { min-width: 0; }
+.mkt-name {
+  font-size: 12px; color: var(--fg); font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mkt-sub {
+  font-size: 10px; color: var(--muted); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mkt-stats { display: flex; gap: 7px; font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+.mkt-price {
+  font-size: 12px; font-weight: 700; color: var(--accent); white-space: nowrap;
+  text-align: right;
+}
+.mkt-price.free { color: #38c98b; }
+
+.mkt-detail {
+  border-top: 1px solid var(--line); padding: 8px; font-size: 11px;
+  background: var(--bg-2); max-height: 40%; overflow: auto;
+}
+.mkt-detail:empty { display: none; }
+.mkt-detail h5 { margin: 0 0 4px; font-size: 12px; }
+.mkt-detail .row { display: flex; gap: 6px; align-items: center; margin: 3px 0; }
+.mkt-detail .param { display: flex; align-items: center; gap: 5px; margin: 3px 0; }
+.mkt-detail .param label { width: 70px; color: var(--muted); font-size: 10px; flex: none; }
+.mkt-detail .param input, .mkt-detail .param select { flex: 1; min-width: 0; font-size: 11px; }
+.mkt-detail .versions { margin-top: 6px; font-size: 10px; color: var(--muted); line-height: 1.7; }
+.mkt-detail .ver-tag {
+  display: inline-block; padding: 0 4px; margin-right: 3px; border-radius: 3px;
+  background: rgba(56,201,139,.16); color: #38c98b; font-size: 9px;
+}
+
+/* ============================================================
+   AI 辅助
+   ============================================================ */
+.ai-tabs {
+  display: flex; gap: 2px; padding: 5px 6px;
+  border-bottom: 1px solid var(--line); background: var(--bg-2);
+}
+.ai-tab {
+  flex: 1; font-size: 11px; padding: 4px 0; border-radius: 5px;
+  background: transparent; color: var(--muted); border-color: transparent;
+}
+.ai-tab.active { background: rgba(74,140,255,.16); color: var(--accent); font-weight: 600; }
+
+.ai-pane { display: none; padding: 8px; flex-direction: column; gap: 6px; }
+.ai-pane.active { display: flex; }
+.ai-pane textarea {
+  width: 100%; height: 92px; resize: vertical;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 7px; font-family: inherit; font-size: 12px; line-height: 1.6;
+}
+.ai-pane textarea:focus { outline: none; border-color: var(--accent); }
+.ai-pane button { align-self: flex-start; font-size: 11px; padding: 5px 12px; }
+
+.ai-result {
+  font-size: 11px; line-height: 1.75; color: var(--muted);
+  max-height: 100%; overflow: auto;
+}
+.ai-result .line { margin: 2px 0; }
+.ai-result .op {
+  display: inline-block; padding: 0 5px; border-radius: 4px; margin-right: 4px;
+  background: rgba(194,55,123,.18); color: #ff8fc4; font-size: 10px;
+  font-family: ui-monospace, monospace;
+}
+.ai-result .why { color: #8a93a6; font-size: 10px; }
+.ai-result .ok { color: #38c98b; }
+.ai-result .warn { color: #ffd166; }
+.ai-result .err { color: #ff5a5a; }
+.ai-result h6 {
+  margin: 6px 0 3px; font-size: 11px; color: var(--fg); font-weight: 600;
+}
+.ai-result .scene {
+  border-left: 2px solid var(--accent); padding-left: 7px; margin: 5px 0;
+}
+.ai-result .scene .t { color: var(--fg); }
+.ai-result .scene .meta { font-size: 10px; color: var(--muted); }
+
+/* ============================================================
+   版本与协作
+   ============================================================ */
+.git-toolbar {
+  display: flex; gap: 4px; padding: 6px 8px;
+  border-bottom: 1px solid var(--line); background: var(--bg-2);
+}
+.git-toolbar select { flex: 1; min-width: 0; font-size: 11px; }
+.git-toolbar button { font-size: 10px; padding: 3px 7px; }
+
+.git-log { flex: 1; min-height: 140px; padding: 4px 0; }
+.git-item {
+  display: grid; grid-template-columns: 58px 1fr auto; gap: 6px; align-items: center;
+  padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,.04);
+  font-size: 11px; cursor: pointer;
+}
+.git-item:hover { background: rgba(255,255,255,.04); }
+.git-item.sel { background: rgba(74,140,255,.14); }
+.git-item .hash {
+  font-family: ui-monospace, monospace; color: var(--muted); font-size: 10px;
+}
+.git-item .msg { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.git-item .meta { font-size: 9px; color: var(--muted); text-align: right; white-space: nowrap; }
+.git-item .tags { display: inline-flex; gap: 2px; margin-left: 4px; }
+.git-item .tag {
+  font-size: 9px; padding: 0 4px; border-radius: 3px;
+  background: rgba(56,201,139,.18); color: #38c98b;
+}
+.git-item.is-head .msg { font-weight: 600; }
+.git-item.is-head .hash { color: var(--accent); }
+
+.git-merge {
+  border-top: 1px solid var(--line); padding: 6px 8px; font-size: 10px;
+  color: var(--muted); max-height: 140px; overflow: auto;
+}
+.git-merge:empty { display: none; }
+.git-merge .conflict { color: #ff5a5a; margin: 2px 0; line-height: 1.6; }
+.git-merge .taken { color: #8a93a6; margin: 1px 0; }
+
+.git-actions {
+  display: flex; gap: 4px; padding: 6px 8px; border-top: 1px solid var(--line);
+}
+.git-actions button { flex: 1; font-size: 10px; padding: 4px 0; }

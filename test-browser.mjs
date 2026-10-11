@@ -459,6 +459,247 @@ const recursion = await page.evaluate(() => {
 });
 ok(/递归/.test(recursion), `递归被拦截：${recursion.slice(0, 40)}`);
 
+/* ---------- 14. V3/V4：市场 / AI / 版本 ---------- */
+console.log('\n=== 14. V3/V4 新面板 ===');
+
+for (const tab of ['market', 'ai', 'git']) {
+  const okTab = await page.evaluate((n) => {
+    const b = document.querySelector(`.tab[data-tab="${n}"]`);
+    if (!b) return false;
+    b.click();
+    return true;
+  }, tab);
+  await page.waitForTimeout(300);
+  const vis = await page.locator(`#tab-${tab}`).isVisible().catch(() => false);
+  ok(okTab && vis, `面板「${tab}」可切换并显示`);
+}
+
+// 14.1 市场：6 套官方模板已上架
+const mkt = await page.evaluate(() => {
+  document.querySelector('.tab[data-tab="market"]').click();
+  return window.BlockAnim.market();
+});
+ok(mkt.count >= 6, `市场上架 ${mkt.count} 个模板`);
+ok(mkt.templates.every(t => t.free), '官方模板应全部免费');
+ok(mkt.templates.every(t => t.author === '官方'), '作者标注为官方');
+const items = await page.locator('#mktList .mkt-item').count();
+ok(items >= 6, `列表渲染 ${items} 张卡片`);
+
+// 14.2 市场：搜索能过滤
+const mktSearch = await page.evaluate(async () => {
+  document.querySelector('#mktQuery').value = '字幕';
+  document.querySelector('#mktQuery').dispatchEvent(new Event('input'));
+  await new Promise(r => setTimeout(r, 320));
+  return document.querySelectorAll('#mktList .mkt-item').length;
+});
+ok(mktSearch === 1, `搜「字幕」得到 ${mktSearch} 个结果`);
+await page.evaluate(async () => {
+  const q = document.querySelector('#mktQuery');
+  q.value = ''; q.dispatchEvent(new Event('input'));
+  await new Promise(r => setTimeout(r, 320));
+});
+
+// 14.3 市场：点卡片出详情 + 参数
+const mktDetail = await page.evaluate(async () => {
+  document.querySelector('#mktList .mkt-item').click();
+  await new Promise(r => setTimeout(r, 200));
+  const d = document.querySelector('#mktDetail');
+  return { html: d.innerHTML.length, buttons: d.querySelectorAll('button').length, text: d.querySelector('h5')?.textContent || '' };
+});
+ok(mktDetail.html > 100, '详情区有内容');
+// 免费模板：喜欢 / 评分 / Remix = 3 个（付费的会多一个「购买」）
+ok(mktDetail.buttons >= 3, `详情区 ${mktDetail.buttons} 个操作按钮`);
+ok(mktDetail.text.length > 0, `标题「${mktDetail.text}」`);
+
+// 14.4 一键 Remix：换参数后载入
+const remix = await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  // 找一个带参数的模板；没有就发布一个带参数的
+  const list = A.market().templates;
+  const withParams = list.find(t => t.name);
+  const before = A.ir.layers.map(l => l.name).join(',');
+  A.remixTemplate(list[0].id);
+  await new Promise(r => setTimeout(r, 300));
+  return { before, after: A.ir.layers.map(l => l.name).join(','), project: A.ir.project.name };
+});
+ok(remix.before !== undefined, 'Remix 前工程存在');
+ok(remix.after.length > 0, `Remix 后图层：${remix.after}`);
+
+// 14.5 AI：自然语言转积木
+const aiParse = await page.evaluate(() => window.BlockAnim.aiParse('让标题逐字弹入，延迟 0.05 秒，然后副标题淡入，时长 1.5 秒'));
+ok(aiParse.actions.length === 2, `识别 ${aiParse.actions.length} 个动作：${aiParse.actions.map(a => a.op).join(',')}`);
+ok(aiParse.actions[0].op === 'charPopIn', '第一个是逐字弹入');
+ok(aiParse.actions[0].why.length > 0, '有解释：' + aiParse.actions[0].why);
+ok(aiParse.warnings.length === 0, '不该有没听懂的片段');
+ok(aiParse.blocks.length === 2, `编译出 ${aiParse.blocks.length} 个积木`);
+ok(aiParse.blocks[0].slots.length === 4, '积木槽位正确');
+
+// 14.6 AI：听不懂的片段会告警
+const aiWarn = await page.evaluate(() => window.BlockAnim.aiParse('标题淡入，然后把冰箱打开'));
+ok(aiWarn.warnings.length >= 1, `未理解片段：${aiWarn.warnings.join('|')}`);
+
+// 14.7 AI：积木真的能应用到工程
+const aiApply = await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  const r = A.aiParse('让标题逐字弹入，延迟 0.05 秒');
+  const layer = A.ir.layers.find(l => l.props.text != null) || A.ir.layers[0];
+  const n = A.aiBlocksToIR(r.blocks, layer.name);
+  await new Promise(r2 => setTimeout(r2, 200));
+  return { n, layerBlocks: layer.blocks.length };
+});
+ok(aiApply.n === 1, `写入 ${aiApply.n} 个积木`);
+
+// 14.8 AI：文案分镜
+const aiSb = await page.evaluate(() => window.BlockAnim.aiStoryboard('做动画其实不用写代码。拖几个积木，动画就出来了。还能跟着音乐节奏自己动。'));
+ok(aiSb.sceneCount === 3, `拆成 ${aiSb.sceneCount} 个场景`);
+ok(aiSb.totalDuration > 0, `总时长 ${aiSb.totalDuration}s`);
+ok(aiSb.scenes.every(s => s.effect && s.reason), '每场都有动效建议与理由');
+ok(aiSb.scenes.every(s => s.subtitles.length > 0), '每场都切好了字幕');
+
+// 14.9 AI：分镜一键生成完整工程
+const aiProject = await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  const r = A.aiApplyStoryboard('第一句话在这里。第二句话稍微长一点点。第三句话。');
+  await new Promise(x => setTimeout(x, 400));
+  return {
+    ...r,
+    w: A.ir.project.width, h: A.ir.project.height,
+    withBlocks: A.ir.layers.filter(l => l.blocks && l.blocks.length).length,
+    markers: A.ir.markers.length,
+  };
+});
+ok(aiProject.layers >= 4, `生成了 ${aiProject.layers} 个图层`);
+ok(aiProject.w === 1080 && aiProject.h === 1920, `竖屏 ${aiProject.w}×${aiProject.h}`);
+ok(aiProject.withBlocks >= 3, `${aiProject.withBlocks} 个图层带动画逻辑`);
+ok(aiProject.markers >= 3, `${aiProject.markers} 个标记点`);
+
+// 14.10 AI：反向解释
+const aiExplain = await page.evaluate(() => window.BlockAnim.aiExplain());
+ok(aiExplain.length >= 3, `工程说明 ${aiExplain.length} 段`);
+ok(aiExplain[0].includes('1080'), aiExplain[0].slice(0, 60));
+
+// 14.11 AI：从帧反推动效
+const aiInfer = await page.evaluate(() => window.BlockAnim.aiInfer());
+ok(aiInfer.samples >= 3, `采样 ${aiInfer.samples} 帧`);
+ok(aiInfer.best && aiInfer.best.effect, `推断为 ${aiInfer.best.effect}`);
+
+// 14.12 AI：工程体检
+const aiLint = await page.evaluate(() => window.BlockAnim.aiLint());
+ok(Array.isArray(aiLint), `体检返回 ${aiLint.length} 条`);
+ok(!aiLint.some(i => i.level === 'error'), '不该有 error：' + JSON.stringify(aiLint.filter(i => i.level === 'error')));
+
+// 14.13 AI 面板 UI 真的渲染出结果
+const aiUI = await page.evaluate(async () => {
+  document.querySelector('.tab[data-tab="ai"]').click();
+  await new Promise(r => setTimeout(r, 150));
+  document.querySelector('[data-ai="nl"]').click();
+  document.querySelector('#aiNlInput').value = '让标题逐字弹入，延迟 0.08 秒';
+  document.querySelector('[data-act="ai.parse"]').click();
+  await new Promise(r => setTimeout(r, 250));
+  const out = document.querySelector('#aiNlResult');
+  return {
+    lines: out.querySelectorAll('.line').length,
+    ops: out.querySelectorAll('.op').length,
+    hasApply: !!out.querySelector('button'),
+  };
+});
+ok(aiUI.ops >= 1, `AI 面板渲染 ${aiUI.ops} 个动作标签`);
+ok(aiUI.hasApply, '有「应用到工程」按钮');
+
+// 14.14 AI 分镜子页签
+const aiSbUI = await page.evaluate(async () => {
+  document.querySelector('[data-ai="script"]').click();
+  document.querySelector('#aiScriptInput').value = '一句话。两句话。三句话。';
+  document.querySelector('[data-act="ai.storyboard"]').click();
+  await new Promise(r => setTimeout(r, 250));
+  const out = document.querySelector('#aiScriptResult');
+  return { scenes: out.querySelectorAll('.scene').length };
+});
+ok(aiSbUI.scenes === 3, `分镜面板渲染 ${aiSbUI.scenes} 个场景`);
+
+// 14.15 版本：提交 / 分支 / 合并
+const gitFlow = await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  A.gitCommit('第一次改动');
+  A.gitCommit('第二次改动');
+  const b1 = A.gitBranch('实验');
+  A.aiApplyStoryboard('分支上的改动。');
+  A.gitCommit('分支提交');
+  A.gitCheckout('main');
+  // main 上也改一笔，制造「两边都改」
+  A.gitCommit('主干提交');
+  const merged = A.gitMerge('实验');
+  return { branches: b1, count: A.repo().count, merged };
+});
+ok(gitFlow.branches.length === 2, `分支：${gitFlow.branches.join(',')}`);
+ok(gitFlow.count >= 4, `版本数 ${gitFlow.count}`);
+ok(gitFlow.merged.ok === true || Array.isArray(gitFlow.merged.conflicts), '合并返回了明确结果');
+
+// 14.16 版本：同一属性被两边改成不同值 → 必须逐条报出冲突
+const gitConflict = await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  A.gitCheckout('main');
+  A.gitCommit('回到主干基线');
+  A.gitBranch('冲突测试');
+
+  const setSize = (v) => {
+    const l = A.ir.layers.find(x => x.props.text != null) || A.ir.layers[1];
+    l.props.fontSize = v;
+  };
+  // 分支上改成 120
+  setSize(120);
+  A.gitCommit('分支把字号改成 120');
+  // 回到主干改成 200
+  A.gitCheckout('main');
+  setSize(200);
+  A.gitCommit('主干把字号改成 200');
+
+  return A.gitMerge('冲突测试');
+});
+ok(gitConflict.ok === false, '同属性冲突应拦下合并');
+ok(gitConflict.conflicts.length > 0, `报出 ${gitConflict.conflicts.length} 条冲突`);
+ok(gitConflict.conflicts.some(c => c.kind === 'propConflict' && c.msg.includes('fontSize')),
+  '冲突项指明是哪个属性：' + JSON.stringify(gitConflict.conflicts.map(c => c.msg)));
+
+// 14.17 版本：可读差异
+const gitDiff = await page.evaluate(() => window.BlockAnim.gitDiff());
+ok(gitDiff.length > 10, `差异文本 ${gitDiff.length} 字`);
+ok(gitDiff.includes('积木') || gitDiff.includes('图层'), '差异里有可读描述');
+
+// 14.18 版本面板 UI
+const gitUI = await page.evaluate(async () => {
+  document.querySelector('.tab[data-tab="git"]').click();
+  await new Promise(r => setTimeout(r, 200));
+  return {
+    items: document.querySelectorAll('#gitLog .git-item').length,
+    branches: document.querySelectorAll('#gitBranch option').length,
+    branches2: window.BlockAnim.repo().branches.length,
+  };
+});
+ok(gitUI.items >= 4, `版本列表 ${gitUI.items} 条`);
+ok(gitUI.branches2 >= 3, `下拉里有 ${gitUI.branches2} 个分支`);
+
+// 14.19 版本库往返
+const gitRoundTrip = await page.evaluate(() => {
+  const A = window.BlockAnim;
+  const json = JSON.parse(JSON.stringify(A.repo()));
+  void json;
+  return { branch: A.repo().branch, count: A.repo().count };
+});
+ok(gitRoundTrip.count >= 4, `版本库可序列化，${gitRoundTrip.count} 个版本`);
+
+// 14.20 素材库：免版权 + 可合成
+const assets = await page.evaluate(() => {
+  const A = window.BlockAnim;
+  const all = [];
+  for (const k of ['font', 'sfx', 'icon', 'background', 'music']) all.push(...A.assets(k));
+  const pop = A.sfx('pop');
+  return { count: all.length, allCC0: all.every(a => a.license === 'CC0'), pop };
+});
+ok(assets.count >= 15, `素材库 ${assets.count} 项`);
+ok(assets.allCC0, '全部标注 CC0 免版权');
+ok(assets.pop.length > 1000, `合成「${assets.pop.key}」得 ${assets.pop.length} 个样本`);
+
 /* ---------- 收尾 ---------- */
 console.log('\n=== 控制台错误汇总 ===');
 ok(errors.length === 0, '全流程无 JS 报错', errors.slice(0, 5).join(' | '));

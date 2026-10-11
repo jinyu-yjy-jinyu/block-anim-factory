@@ -17,6 +17,7 @@ const SUITES = [
   { name: '自定义积木', file: 'test-custom.mjs', desc: '函数定义/宏展开/形参替换/递归保护/跨项目库' },
   { name: '字幕场景文字', file: 'test-scene.mjs', desc: 'SRT/ASS/VTT 往返/场景树/复用实例/文字排版' },
   { name: '节点与批量', file: 'test-node-batch.mjs', desc: '积木↔节点互转/数据绑定/批量队列/参数/插件' },
+  { name: 'V3/V4 市场与 AI', file: 'test-v3v4.mjs', desc: '模板市场与分成/素材库/AI 转积木与分镜/版本分支与合并' },
   { name: '管线集成', file: 'test-pipeline.mjs', desc: 'GIF 编码器字节结构 / ZIP 结构 / 全链路' },
   { name: '浏览器端到端', file: 'test-browser.mjs', desc: '真实 Chrome 驱动 UI：渲染/交互/导出/往返', timeout: 240000 },
   { name: '画面内容断言', file: 'test-visual.mjs', desc: '用像素验证每个模板真的画出了该画的东西', timeout: 180000 },
