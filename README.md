@@ -1,5 +1,8 @@
 # 积木动画工厂
 
+[![CI](https://github.com/jinyu-yjy-jinyu/block-anim-factory/actions/workflows/ci.yml/badge.svg)](https://github.com/jinyu-yjy-jinyu/block-anim-factory/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jinyu-yjy-jinyu/block-anim-factory.svg)](https://github.com/jinyu-yjy-jinyu/block-anim-factory/releases/latest)
+
 > 面向短视频与演示创作者的「可视化编程动画工厂」—— 用积木搭动画逻辑，在软件内完成录音、字幕与渲染，全程不写代码、不离开本软件。
 
 按《可视化编程动画制作软件 · 完整功能规划方案》实现，已完成 **P0 / P1 / P2** 全部规划项。

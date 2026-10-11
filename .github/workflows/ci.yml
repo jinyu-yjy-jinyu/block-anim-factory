@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 允许一次并发跑，取消旧任务
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试（9 套件 / 340+ 断言）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 逻辑套件不依赖浏览器，拆出来先跑，失败能更快看到
+      - name: 逻辑套件
+        run: |
+          node run-tests.mjs
+          node test-audio.mjs
+          node test-video.mjs
+          node test-custom.mjs
+          node test-scene.mjs
+          node test-node-batch.mjs
+          node test-pipeline.mjs
+
+      # 浏览器套件在 ubuntu 上没有 Chrome，会自动跳过
+      - name: 全量测试
+        run: npm test
+
+      - name: 上传测试产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            test-*.log
+            logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  build:
+    name: 打包静态站点
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 本项目零构建 —— 「构建」就是把源码打成 zip，无需 node_modules
+      - name: 打包源码
+        run: |
+          mkdir -p dist
+          cp -r index.html src scripts package.json README.md .gitignore dist/
+          cp run-tests.mjs test-*.mjs make-screenshots.mjs dist/
+          mkdir -p dist/screenshots
+          cp screenshots/*.png dist/screenshots/
+          # 附上规划原文，方便别人对照实现
+          cp 可视化编程动画制作软件_完整功能规划方案.md dist/ 2>/dev/null || true
+          cd dist && zip -qr ../block-anim-factory-source.zip . && cd ..
+          rm -rf dist
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: block-anim-factory-source
+          path: block-anim-factory-source.zip
+          retention-days: 30
+
+  release:
+    name: 发布发行版
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 10
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: block-anim-factory-source
+
+      # 用 package.json 的版本号作为发行标签；该标签已存在说明这版发过了，跳过
+      - name: 判断是否需要发版
+        id: ver
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "标签 v${VERSION} 已存在，跳过发版"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "将发布 v${VERSION}"
+          fi
+
+      - name: 打标签
+        if: steps.ver.outputs.skip == 'false'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.ver.outputs.version }}" -m "发行 v${{ steps.ver.outputs.version }}"
+          git push origin "v${{ steps.ver.outputs.version }}"
+
+      - name: 创建发行版
+        if: steps.ver.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: 积木动画工厂 v${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: block-anim-factory-source.zip
+          body: |
+            ## 积木动画工厂 v${{ steps.ver.outputs.version }}
+
+            用积木搭动画逻辑的可视化编程动画制作软件。零构建、零依赖纯前端，`npm start` 即可运行。
+
+            ### 下载即用
+            解压后需要一个静态服务器（ES Module 不能走 `file://`）：
+            ```bash
+            npm start          # → http://localhost:5173
+            ```
+            也可以用任意静态服务器指向解压目录。
+
+            ### 本次包含
+            - **统一 IR**：积木与节点视图共用一份数据，双向映射可验证无损
+            - **逐帧一致**：预览与导出走同一个 `render()`，只差分辨率
+            - **音频驱动**：录音、波形编辑、节拍检测、EBU R128 响度，画面跟着声音走
+            - **字幕**：SRT / ASS / VTT 导入导出、双语、逐词高亮、爆字数告警
+            - **导出**：MP4（H.264）/ GIF / PNG 序列帧 / WebM
+            - **数据驱动**：CSV/JSON 绑定变量，批量渲染 + 断点续渲
+
+            ### 质量
+            9 个测试套件、340+ 项断言（含真实 Chrome 端到端与像素级画面断言）在 CI 中全部通过。
