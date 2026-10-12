@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+  桌面版入口。这里只负责生命周期与全局异常兜底，
+  真正的界面全部在 Web 应用里（src/），XAML 不含任何 UI 逻辑。
+  主窗口在 App.xaml.cs 里手工 new 出来，因此不设 StartupUri。
+-->
+<Application x:Class="BlockAnimDesktop.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Application.Resources />
+</Application>

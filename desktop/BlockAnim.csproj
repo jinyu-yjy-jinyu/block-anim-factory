@@ -1,0 +1,89 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- 产物命名：积木动画工厂.exe -->
+    <AssemblyName>积木动画工厂</AssemblyName>
+    <RootNamespace>BlockAnimDesktop</RootNamespace>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+
+    <!--
+      自包含 + 单文件，用户不需要装 .NET。
+
+      注意 IncludeNativeLibrariesForSelfExtract：
+      它会把原生 DLL 打包进 exe，启动时再解到 %TEMP% 下的随机目录。
+      WebView2 的原生依赖（WebView2Loader.dll）在这条路径上会加载失败，
+      表现为进程秒退、退出码 0x80008081，且来不及写任何诊断日志。
+      所以这里**保持 false**，让原生 DLL 作为 exe 旁边的文件，
+      代价是产物从单个文件变成「一个文件夹」——
+      对用户来说反而更好：解压即用，不用跑 bundle 解包。
+    -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>false</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <Version>0.3.0</Version>
+    <Product>积木动画工厂</Product>
+    <AssemblyTitle>积木动画工厂 · 可视化编程动画制作软件</AssemblyTitle>
+    <Company>block-anim-factory</Company>
+    <Copyright>MIT</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+  </ItemGroup>
+
+  <!--
+    把 Web 应用打散成一个个资源，编译进 exe，运行时再释放出来。
+
+    LogicalName 里的「..」代表一层目录：
+        web.src.renderer.js  →  释放为 src/renderer.js
+        web.src.ir.js        →  释放为 src/ir.js
+    之所以用两个点而不是目录分隔符：.NET 的资源名里分隔符只能是点，
+    单点无法区分「目录」和「文件名里的点」，所以约定双点为层级。
+-->
+  <ItemGroup>
+    <EmbeddedResource Include="..\index.html" LogicalName="web.index.html" />
+    <EmbeddedResource Include="..\package.json" LogicalName="web.package.json" />
+    <!-- src 下所有文件（.js/.mjs/.css 及子目录） -->
+    <EmbeddedResource Include="..\src\**\*.*" LogicalName="web.src..%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!--
+    tools/ 里是一次性工具（生成 app.ico），有自己的 csproj。
+    必须排除，否则会被主项目的默认 glob 捞进来导致重复特性报错。
+  -->
+  <ItemGroup>
+    <Compile Remove="tools\**" />
+    <EmbeddedResource Remove="tools\**" />
+    <None Remove="tools\**" />
+  </ItemGroup>
+
+  <!--
+    App.xaml 是入口（生成 Main 方法），MainWindow.xaml 是主窗口。
+    这里显式声明 ApplicationDefinition —— WPF SDK 只在文件名恰好叫
+    App.xaml 且被识别为定义时才自动生成 Main，否则会报
+    「程序不包含适合于入口点的静态 Main 方法」。
+  -->
+  <PropertyGroup>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ApplicationDefinition Include="App.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </ApplicationDefinition>
+  </ItemGroup>
+
+</Project>

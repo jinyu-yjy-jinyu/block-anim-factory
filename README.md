@@ -15,11 +15,49 @@
 
 ```bash
 npm start            # 起本地服务 → http://localhost:5173
-npm test             # 跑全部测试（9 个套件）
+npm test             # 跑全部测试（10 个套件）
 npm run screenshots  # 生成界面截图到 screenshots/
 ```
 
 > 必须通过 http 打开，不能直接双击 `file://`——浏览器对 `file://` 下的 ES Module 有跨域限制。
+
+### 桌面版 EXE
+
+不想碰命令行的话，去 [Releases](https://github.com/jinyu-yjy-jinyu/block-anim-factory/releases) 下
+`block-anim-factory-win-x64.zip`，解压后双击 `积木动画工厂.exe`。
+
+| | 网页版 | 桌面版 |
+|---|---|---|
+| 打开方式 | 浏览器打开 `localhost:5173` | 双击 exe |
+| 需要什么 | Node.js（或任意静态服务器） | 只要 Windows |
+| 工程数据存哪 | 浏览器 localStorage | `%LOCALAPPDATA%\BlockAnimFactory` |
+| 导出文件 | 浏览器下载目录 | 系统下载目录 |
+| 体积 | 几百 KB | 约 140 MB（自带 .NET 运行时） |
+
+**系统要求**：Windows 10 / 11 64 位 + **Microsoft Edge WebView2 运行时**。
+Win11 与较新的 Win10 已经预装；如果双击没反应，去
+[developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/microsoft-edge/webview2/) 装一下。
+
+桌面版壳只有 4 个文件，全部逻辑都在 Web 应用里：
+
+```
+desktop/
+  BlockAnim.csproj      打包配置：把整个 Web 应用编进 exe
+  BlockAnim.cs          释放资源 → 起本地静态服务 → WebView2 加载
+  App.xaml(.cs)         入口与全局异常兜底
+  MainWindow.xaml       窗口与启动占位
+  SmokeTest.cs          冒烟测试（--smoke 模式，不开窗口）
+  app.ico               应用图标
+```
+
+本地构建（需要 [.NET 8 SDK](https://dotnet.microsoft.com/download)）：
+
+```bash
+npm run desktop:build   # → desktop/out/积木动画工厂.exe
+npm run desktop:test    # 跑桌面版冒烟测试
+```
+
+GitHub Actions 会在每次推 main 时自动构建 EXE 并上传产物；推 `v*` 标签时发布正式发行版。
 
 ### 5 分钟上手
 
@@ -270,6 +308,13 @@ test-pipeline.mjs           套件 8：GIF/ZIP 字节结构 + 全链路
 test-browser.mjs            套件 9：真实 Chrome 端到端
 test-visual.mjs             套件 10：像素级画面内容断言
 make-screenshots.mjs        生成界面截图
+
+  # —— Windows 桌面版 ——
+desktop/BlockAnim.csproj    桌面版打包配置（.NET 8 + WebView2）
+desktop/BlockAnim.cs        释放资源 → 起本地静态服务 → 加载 WebView2
+desktop/App.xaml(.cs)       入口与全局异常兜底
+desktop/MainWindow.xaml     窗口与启动占位
+desktop/SmokeTest.cs        冒烟测试（--smoke，不开窗口）
 ```
 
 ★ = 核心。
@@ -409,6 +454,8 @@ await BlockAnim.batchRender(
   但目前没有账号体系和真实的支付/结算通道。
 - **ffmpeg.wasm 离线打包**：CDN 地址是硬编码的 unpkg，完全离线环境下 MP4 会自动降级到 WebM 或帧序列。
 - **Lottie / 交互式 HTML 导出**：规划里列了，没做。
+- **macOS / Linux 桌面版**：只做了 Windows。WebView2 是 Windows 专有的，
+  另外两个平台要换成 WKWebView / WebKitGTK，是另一套壳的工程量。
 
 规划里「明确不做的清单」同样被尊重：不碰多轨剪辑与调色、不做专业混音、不做 3D、
 不追 Scratch 式趣味、不做移动端。音频只做「录顺的配音 + 剪干净 + 让画面跟着声音走」。

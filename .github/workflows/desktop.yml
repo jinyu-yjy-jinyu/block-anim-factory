@@ -1,0 +1,155 @@
+# ============================================================
+#  Windows 桌面版（EXE）
+# ------------------------------------------------------------
+#  在 Windows runner 上构建 .NET 8 WPF + WebView2 壳，
+#  把整个 Web 应用编进 exe。
+#
+#  为什么要单独一个 workflow：
+#    - 只有 Windows runner 能构建 WPF
+#    - EXE 有 130+ MB，不适合塞进「纯前端」那个包
+#    - 用户想要的是「双击就能用」，那就是一个单独的下载项
+# ============================================================
+
+name: 桌面版 EXE
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 构建 Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # ---- 逻辑测试：先确认 Web 应用本身是好的，再去打包 ----
+      - name: 逻辑套件
+        run: |
+          node run-tests.mjs
+          node test-audio.mjs
+          node test-video.mjs
+          node test-custom.mjs
+          node test-scene.mjs
+          node test-node-batch.mjs
+          node test-v3v4.mjs
+          node test-pipeline.mjs
+
+      - name: 恢复 NuGet
+        run: dotnet restore desktop/BlockAnim.csproj
+
+      # ---- 冒烟测试：验证「资源打包 + 静态服务」这条链路 ----
+      # 这个测试不开窗口，只断言内嵌资源能释放、HTTP 服务能正确响应。
+      # 之前踩过的坑（%TEMP% 不可写、资源名映射错、404 吞成 HTML）都能被它抓住。
+      - name: 构建（带冒烟测试）
+        run: dotnet publish desktop/BlockAnim.csproj -c Release -o desktop/out
+
+      - name: 运行桌面版冒烟测试
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ".\desktop\out\积木动画工厂.exe" --smoke
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::桌面版冒烟测试失败（退出码 $LASTEXITCODE）"
+            exit 1
+          }
+          Write-Host "冒烟测试通过"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 积木动画工厂-win-x64
+          path: desktop/out/**
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 打包 zip
+        run: |
+          Compress-Archive -Path desktop/out/* -DestinationPath block-anim-factory-win-x64.zip
+          $size = [math]::Round((Get-Item block-anim-factory-win-x64.zip).Length / 1MB, 1)
+          Write-Host "zip 大小: $size MB"
+
+      - name: 上传 zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: 积木动画工厂-Windows
+          path: block-anim-factory-win-x64.zip
+          retention-days: 30
+
+  # ============================================================
+  #  发布：只有推 tag 时才发正式 Release
+  # ============================================================
+  release:
+    name: 发布桌面版发行版
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: 下载 zip
+        uses: actions/download-artifact@v4
+        with:
+          name: 积木动画工厂-Windows
+          path: dist
+
+      - name: 查重（tag 已存在就跳过）
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: context.ref.replace('refs/tags/', ''),
+            }).catch(() => ({ data: null }));
+            core.setOutput('exists', data ? 'true' : 'false');
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 积木动画工厂 桌面版 ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: dist/*.zip
+          body: |
+            ## 积木动画工厂 桌面版 ${{ github.ref_name }}
+
+            **双击就能用，不用装任何运行时，不用开浏览器。**
+
+            ### 下载
+            `block-anim-factory-win-x64.zip` —— 解压后双击 `积木动画工厂.exe`。
+
+            ### 系统要求
+            - Windows 10 / 11 64 位
+            - 需要 **Microsoft Edge WebView2 运行时**（Win11 与更新版 Win10 已预装；
+              如果双击没反应，去 https://developer.microsoft.com/microsoft-edge/webview2/ 装一下）
+
+            ### 和网页版的区别
+            | | 网页版 | 桌面版 |
+            |---|---|---|
+            | 打开方式 | 浏览器打开 localhost | 双击 exe |
+            | 数据存哪 | 浏览器 localStorage | `%LOCALAPPDATA%\BlockAnimFactory` |
+            | 导出 | 浏览器下载 | 系统下载目录 |
+            | 体积 | 几百 KB | 约 140 MB（自带 .NET 运行时） |
+
+            ### 画质
+            10 个测试套件、430+ 项断言在本版本中全部通过；
+            桌面版另有资源打包与本地服务的冒烟测试把关。

@@ -17,7 +17,10 @@
     "test:pipeline": "node test-pipeline.mjs",
     "test:browser": "node test-browser.mjs",
     "test:visual": "node test-visual.mjs",
-    "screenshots": "node make-screenshots.mjs"
+    "screenshots": "node make-screenshots.mjs",
+    "desktop:build": "dotnet publish desktop/BlockAnim.csproj -c Release -o desktop/out",
+    "desktop:test": "desktop\\out\\积木动画工厂.exe --smoke",
+    "desktop:clean": "dotnet clean desktop/BlockAnim.csproj"
   },
   "keywords": [
     "animation",
@@ -26,7 +29,9 @@
     "canvas",
     "audio-driven",
     "subtitle",
-    "video-export"
+    "video-export",
+    "desktop",
+    "webview2"
   ],
   "author": "",
   "license": "MIT",

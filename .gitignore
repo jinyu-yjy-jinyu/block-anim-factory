@@ -16,4 +16,14 @@ Thumbs.db
 _chk.mjs
 dbg*.mjs
 
+# .NET / 桌面版构建产物
+bin/
+obj/
+desktop/out/
+desktop/out-*/
+*.user
+*.suo
+.vs/
+
 # 注意：screenshots/ 是 README 引用的产物，**故意提交**
+# 注意：desktop/app.ico 是应用图标，**故意提交**（否则 CI 上没有图标）
