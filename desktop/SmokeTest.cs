@@ -159,7 +159,15 @@ internal static class SmokeTest
         var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
         var rootFull = Path.GetFullPath(root);
 
-        var server = Task.Run(() => ServeProbe(tcp, rootFull));
+        // 用后台线程而不是 Task.Run：
+        // Task 的线程池线程是「前台」的，ServeProbe 阻塞在 AcceptTcpClient
+        // 上不返回，进程就退不出来 —— CI 上表现为这一步永远卡住。
+        // 后台线程不影响进程退出，tcp.Stop() 之后它会自己醒过来退出。
+        var server = new Thread(() => ServeProbe(tcp, rootFull))
+        {
+            IsBackground = true
+        };
+        server.Start();
 
         try
         {
@@ -192,14 +200,34 @@ internal static class SmokeTest
         }
         finally
         {
-            tcp.Stop();
-            try { server.Wait(2000); } catch { }
+            // 停服务：AcceptTcpClient 会抛异常，ServeProbe 随即返回
+            try { tcp.Stop(); } catch { }
+            server.Join(2000);
             try { Directory.Delete(root, recursive: true); } catch { }
         }
 
-        // --------------------------------------------------------
+        // 把退出码落盘，让 CI 能读到确定的结果。
+        //
+        // 为什么不靠进程退出码：WinExe 通过 Start-Process 启动时，
+        // PowerShell 经常拿不到 ExitCode（空字符串），拿它判断会把
+        // 「断言全过」误判成「失败」。
+        //
+        // 写在哪：和资源释放用同一个 SmokeDir()，再退一级写到 exe 旁边。
+        // 两处都写，CI 无论找到哪个都能读到 —— 省得为了路径对齐来回调。
+        var exitCode = _fail == 0 ? 0 : 1;
         Console.WriteLine($"\n=== 结果: {_pass} 通过 / {_fail} 失败 ===");
-        return _fail == 0 ? 0 : 1;
+
+        foreach (var dir in new[] { SmokeDir(), AppContext.BaseDirectory })
+        {
+            try
+            {
+                File.WriteAllText(Path.Combine(dir, "smoke-exit.txt"),
+                                  exitCode.ToString());
+            }
+            catch { /* 落盘失败不影响测试本身的结论 */ }
+        }
+
+        return exitCode;
     }
 
     // ============================================================
@@ -299,15 +327,23 @@ internal static class SmokeTest
         stream.Flush();
     }
 
-    /// <summary>发一个 GET；非 200 返回 null</summary>
+    /// <summary>发一个 GET；非 200 或超时返回 null</summary>
     private static string? Get(int port, string path)
     {
+        TcpClient? client = null;
         try
         {
-            using var client = new TcpClient();
+            client = new TcpClient();
             client.Connect(IPAddress.Loopback, port);
             client.NoDelay = true;
+
+            // 必须设接收超时：万一服务端对某个请求没写回任何响应，
+            // CopyTo 会一直读到天荒地老，整个冒烟测试就卡死在 CI 上。
+            client.ReceiveTimeout = 5000;
+            client.SendTimeout = 5000;
+
             using var stream = client.GetStream();
+            stream.ReadTimeout = 5000;
 
             var req = Encoding.UTF8.GetBytes(
                 $"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
@@ -326,6 +362,10 @@ internal static class SmokeTest
         catch
         {
             return null;
+        }
+        finally
+        {
+            try { client?.Dispose(); } catch { }
         }
     }
 }

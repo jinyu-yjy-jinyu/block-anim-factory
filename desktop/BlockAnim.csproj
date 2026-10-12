@@ -70,10 +70,14 @@
   </ItemGroup>
 
   <!--
-    App.xaml 是入口（生成 Main 方法），MainWindow.xaml 是主窗口。
+    App.xaml 是入口（MainWindow.xaml 是主窗口）。
     这里显式声明 ApplicationDefinition —— WPF SDK 只在文件名恰好叫
     App.xaml 且被识别为定义时才自动生成 Main，否则会报
     「程序不包含适合于入口点的静态 Main 方法」。
+
+    App.xaml.cs 里自己写了 Main，
+    目的是在 WPF 起来之前就分叉掉 smoke 模式。
+    两份 Main 会冲突，所以关掉自动生成，改由 RunWpf() 复刻默认逻辑。
   -->
   <PropertyGroup>
     <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>

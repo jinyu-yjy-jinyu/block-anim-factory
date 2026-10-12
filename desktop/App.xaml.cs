@@ -18,11 +18,12 @@ public partial class App : Application
     {
         // --smoke 模式：只跑资源与静态服务的断言，不开窗口。
         // CI 用它来验证「桌面版能被正确打包」。
+        //
+        // 用 Environment.Exit 而不是 Shutdown()：Shutdown 只是请求退出，
+        // WPF 的消息循环、Dispatcher、还有 WebView2 的宿主线程都可能
+        // 让进程赖着不走 —— CI 上表现为「断言全过，但这一步永远卡住」。
         if (e.Args.Contains("--smoke"))
-        {
-            Shutdown(Tests.SmokeTest.Run());
-            return;
-        }
+            Environment.Exit(Tests.SmokeTest.Run());
 
         // 全局异常兜底：桌面端崩了就白屏，用户一脸懵。
         // 这里至少弹个框说明原因，而不是无声退出。

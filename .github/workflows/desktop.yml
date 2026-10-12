@@ -68,15 +68,35 @@ jobs:
           if (-not $exe) { Write-Host '::error::没找到 exe'; exit 1 }
           Write-Host "运行 $($exe.Name) --smoke"
 
-          # 必须用 Start-Process -Wait：直接 `& xxx.exe` 对 WinExe 不等待，
-          # $LASTEXITCODE 也是空的，结果就是断言全过却被判失败。
+          # 让程序把结果写进 smoke-exit.txt，用文件判断成败。
+          # 为什么不信退出码：WinExe 在 Start-Process -Wait 下经常拿不到
+          # ExitCode（空字符串），拿它判断会把「全过」判成「失败」。
+          # 程序会同时写两处（用户数据目录 + exe 旁），这里两个都查。
+          $candidates = @(
+            (Join-Path $env:LOCALAPPDATA 'BlockAnimFactory\smoke-exit.txt'),
+            (Join-Path $env:APPDATA      'BlockAnimFactory\smoke-exit.txt'),
+            '.\desktop\out\smoke-exit.txt'
+          )
+          foreach ($f in $candidates) { if (Test-Path $f) { Remove-Item $f -Force } }
+
+          # 必须 -Wait：直接 `& xxx.exe` 对 WinExe 不等待，
+          # $LASTEXITCODE 也是空的，断言全过也会被判失败。
           $p = Start-Process -FilePath $exe.FullName `
                              -ArgumentList '--smoke' `
                              -NoNewWindow -Wait -PassThru
-          $code = $p.ExitCode
-          Write-Host "退出码 = $code"
-          if ($code -ne 0) {
-            Write-Host "::error::桌面版冒烟测试失败（退出码 $code）"
+
+          Write-Host "进程退出码 = '$($p.ExitCode)'"
+
+          $resultFile = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $resultFile) {
+            Write-Host '::error::冒烟测试没有写结果文件，可能连 Main 都没跑到'
+            exit 1
+          }
+
+          $fileCode = [int](Get-Content $resultFile -Raw).Trim()
+          Write-Host "结果文件 = $resultFile（$fileCode）"
+          if ($fileCode -ne 0) {
+            Write-Host "::error::桌面版冒烟测试失败（退出码 $fileCode）"
             exit 1
           }
           Write-Host '冒烟测试通过'
