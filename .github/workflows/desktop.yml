@@ -109,6 +109,16 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: 清理冒烟测试留下的文件
+        shell: pwsh
+        run: |
+          # smoke-exit.txt 是测试产物，不该跟着 exe 一起发给用户
+          Get-ChildItem '.\desktop\out\smoke-exit.txt' -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+          Get-ChildItem '.\desktop\out\*.xml' -ErrorAction SilentlyContinue |
+            Remove-Item -Force          # NuGet 包的 XML 文档，用户也用不上
+          Get-ChildItem '.\desktop\out' | Select-Object Name
+
       - name: 打包 zip
         run: |
           Compress-Archive -Path desktop/out/* -DestinationPath block-anim-factory-win-x64.zip

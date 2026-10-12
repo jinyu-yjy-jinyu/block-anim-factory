@@ -21,11 +21,12 @@ bin/
 obj/
 desktop/out/
 desktop/out-*/
+smoke-exit.txt
 *.user
 *.suo
 .vs/
 
 # 注意：screenshots/ 是 README 引用的产物，**故意提交**
 # 注意：desktop/app.ico 是应用图标，**故意提交**（否则 CI 上没有图标）
-# һ�����ύ�ĸ�Ŀ¼�ļ�
+# һ�����ύ�ĸ�Ŀ¼�ļ�
 /BlockAnim.cs
