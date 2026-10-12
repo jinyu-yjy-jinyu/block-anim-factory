@@ -64,13 +64,22 @@ jobs:
       - name: 运行桌面版冒烟测试
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          & ".\desktop\out\积木动画工厂.exe" --smoke
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::桌面版冒烟测试失败（退出码 $LASTEXITCODE）"
+          $exe = Get-ChildItem '.\desktop\out\*.exe' | Select-Object -First 1
+          if (-not $exe) { Write-Host '::error::没找到 exe'; exit 1 }
+          Write-Host "运行 $($exe.Name) --smoke"
+
+          # 必须用 Start-Process -Wait：直接 `& xxx.exe` 对 WinExe 不等待，
+          # $LASTEXITCODE 也是空的，结果就是断言全过却被判失败。
+          $p = Start-Process -FilePath $exe.FullName `
+                             -ArgumentList '--smoke' `
+                             -NoNewWindow -Wait -PassThru
+          $code = $p.ExitCode
+          Write-Host "退出码 = $code"
+          if ($code -ne 0) {
+            Write-Host "::error::桌面版冒烟测试失败（退出码 $code）"
             exit 1
           }
-          Write-Host "冒烟测试通过"
+          Write-Host '冒烟测试通过'
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
