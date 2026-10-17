@@ -23,8 +23,19 @@ npm run screenshots  # 生成界面截图到 screenshots/
 
 ### 桌面版 EXE
 
-不想碰命令行的话，去 [Releases](https://github.com/jinyu-yjy-jinyu/block-anim-factory/releases) 下
-`block-anim-factory-win-x64.zip`，解压后双击 `积木动画工厂.exe`。
+不想碰命令行的话，去 [Releases](https://github.com/jinyu-yjy-jinyu/block-anim-factory/releases) 下载，**有两种格式**：
+
+| 文件 | 适合谁 |
+|---|---|
+| `积木动画工厂-*-win-x64-setup.exe` | 想要「像个软件」：装完有开始菜单入口、桌面图标、卸载入口 |
+| `block-anim-factory-win-x64.zip` | 想解压即用 / 放 U 盘里带走，不需要安装 |
+
+安装版装到 `%LOCALAPPDATA%\Programs\积木动画工厂`，**不需要管理员权限**（这也是刻意选的路径，
+未签名的程序写 `Program Files` 会弹 UAC，反而更麻烦）。
+
+**第一次打开会看到「Windows 已保护你的电脑」**（SmartScreen）——这是正常的，因为本项目开源、
+**不做代码签名**（不买证书）。点「更多信息」→「仍要运行」即可。安装包同理。
+源码和完整构建过程都在这个仓库里，可以在 [Actions](../../actions) 页面看每次构建日志。
 
 | | 网页版 | 桌面版 |
 |---|---|---|

@@ -132,6 +132,50 @@ jobs:
           Write-Host '清理后 desktop/out 内容：'
           Get-ChildItem '.\desktop\out' | Select-Object Name
 
+      - name: 安装 Inno Setup
+        shell: pwsh
+        run: |
+          # 用 choco 而不是 jurplel/install-innosetup-action：
+          #   runner 镜像自带 choco，静默安装可预期；
+          #   第三方 action 的版本/兼容性我们控制不了。
+          choco install innosetup -y --no-progress
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            # choco 装完通常在 PATH，但兜底找一下默认安装位置
+            $cands = @(
+              "$env:ProgramFiles(x86)\Inno Setup 6\iscc.exe",
+              "$env:ProgramFiles\Inno Setup 6\iscc.exe"
+            )
+            $hit = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $hit) { Write-Host '::error::Inno Setup 安装后仍找不到 iscc'; exit 1 }
+            Write-Host "iscc: $hit"
+            # 放进 PATH 供下一步用（Add-Content 只在当前 job 有效）
+            Add-Content -Path $env:GITHUB_PATH -Value (Split-Path $hit -Parent)
+          } else {
+            Write-Host "iscc: $($iscc.Source)"
+          }
+
+      - name: 编译安装包
+        shell: pwsh
+        run: |
+          # 纯打包层：只把 desktop/out 里已构建好的文件打成安装包，
+          # 不重新编译、不碰任何 C# 代码。
+          $src = 'desktop\installer.iss'
+          if (-not (Test-Path $src)) { Write-Host "::error::缺少 $src"; exit 1 }
+          iscc $src /Q
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::iscc 失败（$LASTEXITCODE）"; exit $LASTEXITCODE }
+          $setup = Get-ChildItem '积木动画工厂-*-setup.exe' | Select-Object -First 1
+          if (-not $setup) { Write-Host '::error::没生成安装包'; exit 1 }
+          Write-Host "安装包: $($setup.Name)  $([math]::Round($setup.Length/1MB,1)) MB"
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: 积木动画工厂-安装包
+          path: 积木动画工厂-*-setup.exe
+          retention-days: 30
+          if-no-files-found: error
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
@@ -186,14 +230,26 @@ jobs:
           name: 积木动画工厂-Windows
           path: dist
 
+      - name: 下载安装包
+        uses: actions/download-artifact@v4
+        with:
+          name: 积木动画工厂-安装包
+          path: dist
+
       - name: 挂到已有的发行版（没有就跳过）
         uses: softprops/action-gh-release@v2
         with:
           # 只指定 tag_name，不给 name/body：
           # 这样是「往已有发行版追加资源」，不会覆盖原有的说明文字。
           tag_name: ${{ inputs.tag }}
-          files: dist/*.zip
+          # zip（便携版）与 setup.exe（安装版）都挂。
+          # 两种都保留：有人想解压即用，有人要开始菜单/卸载入口。
+          files: |
+            dist/*.zip
+            dist/*-setup.exe
           make_latest: false
 
       - name: 说明
-        run: echo "已把桌面版 EXE 挂到 ${{ inputs.tag }}"
+        run: |
+          echo "已把桌面版（zip + 安装包）挂到 ${{ inputs.tag }}"
+          echo "注意：安装包未做代码签名，首次运行会触发 SmartScreen。"

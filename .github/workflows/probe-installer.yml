@@ -1,0 +1,168 @@
+# ============================================================
+#  临时验证 workflow（probe/installer-verify 分支专用，跑完即删）
+# ------------------------------------------------------------
+#   为什么需要它：本机编译环境有问题（Inno Setup 在 %TEMP% 建解压目录
+#   被拒绝访问，Error 5），本地安装结果不可信。必须在干净的
+#   windows-latest 上验一次，四条判据全过才算安装包可信。
+#
+#   判据：
+#     A. 静默安装退出码 0
+#     B. %LOCALAPPDATA%\Programs\积木动画工厂\积木动画工厂.exe 存在
+#     C. 开始菜单快捷方式存在
+#     D. 静默卸载成功，安装目录被清掉
+#
+#   用 on:push 限定分支触发 —— workflow_dispatch 在非默认分支会 404。
+# ============================================================
+
+name: 验证安装包（临时）
+
+on:
+  push:
+    branches: ['probe/installer-verify']
+
+jobs:
+  verify:
+    name: 云端验证安装/卸载
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 构建桌面版
+        run: dotnet publish desktop/BlockAnim.csproj -c Release -o desktop/out
+
+      - name: 安装 Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            $cands = @(
+              "$env:ProgramFiles(x86)\Inno Setup 6\iscc.exe",
+              "$env:ProgramFiles\Inno Setup 6\iscc.exe"
+            )
+            $hit = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $hit) { Write-Host '::error::找不到 iscc'; exit 1 }
+            Add-Content -Path $env:GITHUB_PATH -Value (Split-Path $hit -Parent)
+            Write-Host "iscc: $hit"
+          } else { Write-Host "iscc: $($iscc.Source)" }
+
+      - name: 编译安装包
+        shell: pwsh
+        run: |
+          iscc desktop\installer.iss /Q
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::iscc 失败（$LASTEXITCODE）"; exit 1 }
+          $setup = Get-ChildItem '积木动画工厂-*-setup.exe' | Select-Object -First 1
+          if (-not $setup) { Write-Host '::error::没生成安装包'; exit 1 }
+          Write-Host "安装包: $($setup.Name)  $([math]::Round($setup.Length/1MB,1)) MB"
+
+      # ----------------------------------------------------------
+      #  判据 A：静默安装退出码必须为 0
+      # ----------------------------------------------------------
+      - name: 判据 A · 静默安装
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem '积木动画工厂-*-setup.exe' | Select-Object -First 1).FullName
+          $log = Join-Path $env:RUNNER_TEMP 'install.log'
+          Write-Host "运行: $setup /VERYSILENT"
+          $p = Start-Process -FilePath $setup `
+                 -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=$log" `
+                 -Wait -PassThru
+          Write-Host "退出码 = $($p.ExitCode)"
+          if (Test-Path $log) {
+            Write-Host '=== 安装日志（尾部） ==='
+            Get-Content $log -Tail 40
+          } else {
+            Write-Host '::warning::安装日志没有生成'
+          }
+          if ($p.ExitCode -ne 0) {
+            Write-Host "::error::判据 A 失败：安装退出码 $($p.ExitCode)"
+            exit 1
+          }
+          Write-Host '判据 A 通过 ✓'
+
+      # ----------------------------------------------------------
+      #  判据 B：主程序必须落在预期位置
+      # ----------------------------------------------------------
+      - name: 判据 B · 主程序存在
+        shell: pwsh
+        run: |
+          $expected = Join-Path $env:LOCALAPPDATA 'Programs\积木动画工厂\积木动画工厂.exe'
+          Write-Host "期望路径: $expected"
+          if (-not (Test-Path $expected)) {
+            Write-Host '::error::判据 B 失败：主程序不在预期位置'
+            Write-Host '实际安装目录内容：'
+            $dir = Join-Path $env:LOCALAPPDATA 'Programs'
+            if (Test-Path $dir) { Get-ChildItem $dir | Select-Object Name }
+            exit 1
+          }
+          $sz = [math]::Round((Get-Item $expected).Length / 1MB, 1)
+          Write-Host "判据 B 通过 ✓（$sz MB）"
+
+      # ----------------------------------------------------------
+      #  判据 C：开始菜单快捷方式必须存在
+      # ----------------------------------------------------------
+      - name: 判据 C · 开始菜单快捷方式
+        shell: pwsh
+        run: |
+          # 程序组名 = AppName（积木动画工厂），装在用户的 Programs 组下
+          $group = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\积木动画工厂'
+          $alt   = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\积木动画工厂'
+          $hit = @($group, $alt) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $hit) {
+            Write-Host '::error::判据 C 失败：开始菜单没有「积木动画工厂」文件夹'
+            Write-Host '两个候选位置：'
+            Write-Host "  $group"
+            Write-Host "  $alt"
+            Write-Host '实际 Start Menu\Programs 内容（前 20 项）：'
+            Get-ChildItem (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs') -ErrorAction SilentlyContinue |
+              Select-Object -First 20 Name
+            exit 1
+          }
+          Write-Host "开始菜单目录: $hit"
+          Get-ChildItem $hit | Select-Object Name
+          $lnks = @(Get-ChildItem $hit -Filter '*.lnk')
+          if ($lnks.Count -eq 0) { Write-Host '::error::判据 C 失败：文件夹里没有快捷方式'; exit 1 }
+          Write-Host "判据 C 通过 ✓（$($lnks.Count) 个快捷方式：$($lnks.Name -join ', ')）"
+
+      # ----------------------------------------------------------
+      #  判据 D：静默卸载必须成功，且目录被清掉
+      # ----------------------------------------------------------
+      - name: 判据 D · 静默卸载
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\积木动画工厂'
+          $unins = Join-Path $dir 'unins000.exe'
+          if (-not (Test-Path $unins)) {
+            Write-Host "::error::判据 D 失败：卸载程序不存在（$unins）"
+            Write-Host '目录内容：'
+            Get-ChildItem $dir -ErrorAction SilentlyContinue | Select-Object Name
+            exit 1
+          }
+          Write-Host "运行卸载: $unins /VERYSILENT"
+          $p = Start-Process -FilePath $unins `
+                 -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' `
+                 -Wait -PassThru
+          Write-Host "卸载退出码 = $($p.ExitCode)"
+          # 卸载程序自删有延迟，等一会儿再判断
+          $gone = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 500
+            if (-not (Test-Path $dir)) { $gone = $true; break }
+          }
+          if ($p.ExitCode -ne 0) { Write-Host "::error::判据 D 失败：卸载退出码 $($p.ExitCode)"; exit 1 }
+          if (-not $gone) {
+            Write-Host "::error::判据 D 失败：卸载后目录仍在（$dir）"
+            Get-ChildItem $dir -ErrorAction SilentlyContinue | Select-Object Name
+            exit 1
+          }
+          Write-Host '判据 D 通过 ✓（目录已清掉）'
+
+      - name: 汇总
+        run: |
+          echo "::notice::四条判据全部通过 —— 安装包可信：A 安装 exit0 / B 主程序在 / C 开始菜单有 / D 卸载干净"

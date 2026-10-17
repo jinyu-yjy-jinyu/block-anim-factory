@@ -27,5 +27,15 @@ smoke-exit.txt
 *.suo
 .vs/
 
+# 安装包产物 / Inno Setup 编译中间物
+# 用通用规则而不是列举具体文件名：列举式总会漏掉下一个实验包的名字
+# （曾经漏过 exp-a-setup.exe / tmp-exp-a.iss，133 MB 差点进仓库）。
+# 注意：只忽略仓库根的这些产物；desktop/installer.iss 是**正式源文件**，
+# 它不叫 tmp-*.iss，不受影响。
+/*-setup.exe
+/*.iss.bak
+/tmp-*.iss
+/exp-*.iss
+
 # 注意：screenshots/ 是 README 引用的产物，**故意提交**
 # 注意：desktop/app.ico 是应用图标，**故意提交**（否则 CI 上没有图标）
