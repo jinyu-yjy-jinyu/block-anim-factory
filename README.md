@@ -15,7 +15,7 @@
 
 ```bash
 npm start            # 起本地服务 → http://localhost:5173
-npm test             # 跑全部测试（10 个套件）
+npm test             # 跑全部测试（12 个套件）
 npm run screenshots  # 生成界面截图到 screenshots/
 ```
 
@@ -202,7 +202,7 @@ GitHub Actions 会在每次推 main 时自动构建 EXE 并上传产物；推 `v
 
 ## 测试
 
-`npm test` 依次跑 10 个套件，共 **430+ 项断言**：
+`npm test` 依次跑 12 个套件，共 **558 项纯逻辑断言**，另含真实 Chromium 驱动的端到端与像素级画面断言：
 
 | 套件 | 覆盖内容 |
 |---|---|
@@ -234,6 +234,19 @@ GitHub Actions 会在每次推 main 时自动构建 EXE 并上传产物；推 `v
 - **节点图往返时子块槽只取了第一条执行边** → 嵌套块丢失
 - **`fromText` 返回 `{ir, notes}` 而调用方当 IR 用** → 版本库恢复后全为空
 - **AI 把 `charPopIn` 的「间隔」写成 time 槽** → 该槽在 `blocks.js` 里声明的是 num
+
+## 已知问题
+
+- **旧工程的「粒子与重复器」参数可能不对**：「粒子与重复器」模板自首个公开版本起
+  即为坏的（粒子不动、重复条没有高度），本版已修正模板本身。用旧版本模板保存过的
+  工程需重新配置这两个积木的参数，后续版本提供自动迁移。
+- **GIF 导出颜色偏色**：调色板大小与压缩码宽已修，但整体色差仍超标，根因排查中。
+  PNG 序列帧与 MP4 不受影响。
+- **积木嵌套过深时画面会静默停住**：为防止界面卡死加了帧内步数上限，
+  超限时本帧到此为止，界面暂无提示。
+- **音频不随版本回滚**：音频轨道不作版本快照，回滚到旧版本时画面与字幕回退、音频保持当前状态。
+- 本项目刚开源，尚未经过真实使用验证。以上已知问题可能在日常使用中还会增加，
+  欢迎到 Issues 反馈。
 
 ---
 
@@ -300,8 +313,10 @@ test-scene.mjs              套件 5：字幕 / 场景树 / 文字引擎
 test-node-batch.mjs         套件 6：节点图 / 数据 / 批量 / 参数 / 插件
 test-v3v4.mjs               套件 7：模板市场 / 素材库 / AI / 版本协作
 test-pipeline.mjs           套件 8：GIF/ZIP 字节结构 + 全链路
-test-browser.mjs            套件 9：真实 Chrome 端到端
-test-visual.mjs             套件 10：像素级画面内容断言
+test-markdirty.mjs          套件 9：未保存状态 / 标记点撤销 / 单次导入
+test-renderer-img.mjs       套件 10：图片缓存失败重试
+test-browser.mjs            套件 11：真实 Chrome 端到端
+test-visual.mjs             套件 12：像素级画面内容断言
 make-screenshots.mjs        生成界面截图
 
   # —— Windows 桌面版 ——
