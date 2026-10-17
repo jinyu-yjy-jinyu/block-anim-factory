@@ -242,13 +242,23 @@ export class SceneTree {
     if (this.all(node).some(n => n.id === newParentId)) return false;
     const oldParent = this.parentOf(id);
     if (!oldParent) return false;
-    const oi = oldParent.children.indexOf(node);
-    oldParent.children.splice(oi, 1);
     const np = this.find(newParentId);
-    if (!np) { oldParent.children.splice(oi, 0, node); return false; }
-    if (!np.isGroup) { np.isGroup = true; }
-    if (index < 0 || index > np.children.length) np.children.push(node);
-    else np.children.splice(index, 0, node);
+    if (!np) return false;
+    // 非组节点不能当父级：靠 autoGroup 包一层新组（与 add 的做法一致）。
+    // 不能写 np.isGroup = true —— isGroup 是只读 getter，赋值会抛 TypeError，
+    // 而且即使可写也会把原节点的类型与属性一起毁掉。
+    // 注意：必须在摘出 node 之前完成，否则中途返回会让图层整个丢失。
+    let parent = np;
+    if (!np.isGroup) {
+      const gid = this.autoGroup(np);
+      parent = this.find(gid);
+      if (!parent) return false;
+    }
+    const oi = oldParent.children.indexOf(node);
+    if (oi < 0) return false;
+    oldParent.children.splice(oi, 1);
+    if (index < 0 || index > parent.children.length) parent.children.push(node);
+    else parent.children.splice(index, 0, node);
     return true;
   }
 

@@ -22,9 +22,18 @@ function crc32(buf) {
 async function deflateRaw(u8) {
   if (typeof CompressionStream === 'undefined') return null;
   try {
+    // 关键：不要写成 `new Blob([u8]).stream()`。
+    // Blob 构造会把 u8 **整份复制**进 blob 的存储，然后 .stream() 再从
+    // 那份副本读出来 —— 等于为了压缩一帧 PNG，内存里先多出一整份。
+    // 序列帧导出时这是每帧一次、峰值随帧数线性涨的主因。
+    // 直接把 u8 写进 CompressionStream 的 writable，零额外拷贝。
     const cs = new CompressionStream('deflate-raw');
-    const stream = new Blob([u8]).stream().pipeThrough(cs);
-    const buf = await new Response(stream).arrayBuffer();
+    const writer = cs.writable.getWriter();
+    // 必须先挂上读端再写，否则背压会把写端卡住
+    const readPromise = new Response(cs.readable).arrayBuffer();
+    writer.write(u8);
+    writer.close();
+    const buf = await readPromise;
     return new Uint8Array(buf);
   } catch {
     return null;
@@ -32,7 +41,9 @@ async function deflateRaw(u8) {
 }
 
 export async function createZip(entries, onProgress) {
-  // entries: [{name, data: Uint8Array}]
+  // entries: [{name, data: Uint8Array}] 或 [{name, data: () => Promise<Uint8Array>}]
+  // 传函数形式时**逐条取数据、压缩完就丢弃原始引用**，峰值内存不再随
+  // 帧数线性增长（序列帧导出 1080p 120 帧时，全攒着要 ~200MB 常驻）。
   const chunks = [];
   const central = [];
   let offset = 0;
@@ -45,7 +56,8 @@ export async function createZip(entries, onProgress) {
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
     const nameBytes = enc.encode(e.name);
-    const raw = e.data;
+    // 延迟取数：data 可能是 Uint8Array，也可能是返回它的函数
+    const raw = typeof e.data === 'function' ? await e.data() : e.data;
     const crc = crc32(raw);
 
     let method = 0;
@@ -53,11 +65,15 @@ export async function createZip(entries, onProgress) {
     const packed = await deflateRaw(raw);
     if (packed && packed.length < raw.length) { method = 8; body = packed; }
 
+    // 文件名一律按 UTF-8 写入；含非 ASCII 时必须置 general purpose bit 11 (0x0800)，
+    // 否则解压方会退回本地代码页解码，中文名乱码。
+    const flags = /[^\x00-\x7F]/.test(e.name) ? 0x0800 : 0;
+
     const local = new Uint8Array(30 + nameBytes.length);
     const lv = new DataView(local.buffer);
     lv.setUint32(0, 0x04034b50, true);
     lv.setUint16(4, 20, true);
-    lv.setUint16(6, 0, true);
+    lv.setUint16(6, flags, true);
     lv.setUint16(8, method, true);
     lv.setUint16(10, dosTime, true);
     lv.setUint16(12, dosDate, true);
@@ -75,7 +91,7 @@ export async function createZip(entries, onProgress) {
     cv.setUint32(0, 0x02014b50, true);
     cv.setUint16(4, 20, true);
     cv.setUint16(6, 20, true);
-    cv.setUint16(8, 0, true);
+    cv.setUint16(8, flags, true);
     cv.setUint16(10, method, true);
     cv.setUint16(12, dosTime, true);
     cv.setUint16(14, dosDate, true);

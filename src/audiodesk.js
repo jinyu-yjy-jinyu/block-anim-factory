@@ -9,8 +9,11 @@
    所有编辑都走 WaveEditor 的撤销栈，原始音频永不丢失。
    ============================================================ */
 
-import { Recorder, AUDIO_PRESETS, WaveEditor, fileToTrack, applyPreset } from './recorder.js';
-import { normalizeLoudness, LOUDNESS_PRESETS, mixTracks } from './audio-core.js';
+import { Recorder, AUDIO_PRESETS, WaveEditor, fileToTrack, applyPreset, blobToTrack } from './recorder.js';
+import { LOUDNESS_PRESETS, mixTracks, mixDuration, measureLoudness } from './audio-core.js';
+
+/** 混音与响度测量统一用这个采样率，两处必须一致，否则 LUFS 算错 */
+const MIX_RATE = 48000;
 
 export class AudioDesk {
   constructor(opts = {}) {
@@ -358,7 +361,61 @@ export class AudioDesk {
     if (!target) return null;
     const mixed = this.mix();
     if (!mixed) return null;
-    return normalizeLoudness(mixed.samples, mixed.sampleRate, target);
+    // 先按混音结果测出需要的增益。混音是线性求和，所以「整段乘 g」
+    // 等价于「每条轨道各乘 g」，增益算一次就够。
+    const before = measureLoudness(mixed, MIX_RATE);
+    if (before.lufs <= -69) return null;
+    const ceiling = Math.pow(10, (target.ceilingDb == null ? -1 : target.ceilingDb) / 20);
+    let gain = Math.pow(10, (target.lufs - before.lufs) / 20);
+    if (before.peak * gain > ceiling && before.peak > 0) gain = ceiling / before.peak;
+
+    // 增益必须真正落到每条参与混音的轨道上，不能只返回一份算好的副本。
+    // 导出链（main.js）读的是 App.audioTracks 重新混音，那些轨道没被改过，
+    // 只返回副本会让用户看到「已归一到 −14 LUFS」的提示、成品却还是原音量 ——
+    // 一种比崩溃更隐蔽的失败。注意是每条轨道各自乘 gain：只改混音结果的话，
+    // 下次混音的输入还是老的。
+    const affected = this.tracks.filter(tr => tr && !tr.muted && tr.samples && tr.samples.length);
+    if (!affected.length) return null;
+    for (const tr of affected) {
+      // 走 WaveEditor.gain 而不是 AudioTrack.applyGain：
+      // applyGain 绕过撤销栈，用户按撤销会退不回来。gain() 会先把这一段
+      // 样本存进 backup 再原地乘，undo() 里 'gain' 分支用
+      // samples.set(backup, offset) 原样还原。每条轨道有各自的编辑器
+      // （见 rebuildEditor），所以撤销是「谁的轨谁退」。
+      if (!tr.editor) tr.editor = new WaveEditor(tr);
+      tr.editor.gain(0, tr.duration, gain);
+    }
+
+    // 用改完的轨道重新混一遍，报告「实际达成」而不是「算出来的」响度：
+    // mixTracks 末尾有软限幅，理论上可能与预期有偏差，据实报数。
+    //
+    // ── 为什么「带闪避」时会差一点点（这是设计如此，不是待修的 bug）──
+    // 当 voice 与 music 同时存在、且闪避开着时，实测会落在目标下方 1 dB
+    // 上下（本机一颗样例：目标 −14，实测 −14.84）。原因在测量环境本身
+    // 前后不一致，而非增益算错：
+    //   · 增益是按「改前」的混音结果算出来的（上面 before）；
+    //   · 但 buildVoiceEnergy 用**绝对电平**算包络（audio-core.js 的
+    //     Math.min(1, rms * 4)），归一抬高电平后 rms 变大、包络更接近
+    //     饱和 —— 实测包络均值 0.1586 → 0.3337；
+    //   · 包络变大 → 音乐被 duckTo 压得更深 → 改完重测的响度低于预测。
+    // 所以偏差只出现在「有 voice + 有 music + 闪避开」这一个组合里。
+    // 实测对照：纯 music 偏差 0.00 dB，关掉闪避偏差 0.00 dB。
+    // 用户看到的是两个数都报出来（目标值 + 实测值），没有谎报成功。
+    // 若将来要求「一键必须字面达标」，做法是按改后包络迭代重算增益；
+    // 那属于行为变更（一次性算增益 → 反复改用户音频），需要产品侧先拍板。
+    const afterMix = this.mix();
+    const after = afterMix ? measureLoudness(afterMix, MIX_RATE) : before;
+
+    this.render();
+    this.onChange(this);
+    return {
+      tracks: affected.length,
+      sampleRate: MIX_RATE,
+      gain,
+      lufs: after.lufs,
+      before: before.lufs,
+      peak: after.peak,
+    };
   }
 
   /* ============================================================
@@ -366,7 +423,10 @@ export class AudioDesk {
      ============================================================ */
   mix() {
     if (!this.tracks.length) return null;
-    return mixTracks(this.tracks);
+    const mixed = mixTracks(this.tracks, mixDuration(this.tracks));
+    // 没声音时给 null，让调用方能明确判断「没有音频可处理」，
+    // 而不是拿到一个长度 0 的数组当成正常结果往下走。
+    return mixed && mixed.length ? mixed : null;
   }
 
   /* ============================================================
@@ -395,10 +455,4 @@ function peakOf(peaks) {
   for (let i = 0; i < peaks.max.length; i++) if (peaks.max[i] > m) m = peaks.max[i];
   for (let i = 0; i < peaks.min.length; i++) if (-peaks.min[i] > m) m = -peaks.min[i];
   return m;
-}
-
-async function blobToTrack(blob) {
-  const buf = await blob.arrayBuffer();
-  const { decodeWav } = await import('./audio-core.js');
-  return decodeWav(buf);
 }

@@ -15,9 +15,28 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { existsSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+
+/* 浏览器定位：优先 CHROME_PATH（test-all.mjs 会传入它定位到的路径），
+   其次 playwright 自带 chromium，最后退到系统安装。
+   原来硬编码 'C:\\Program Files\\...\\chrome.exe'，
+   在 ubuntu runner 上必然 ENOENT，整个套件起不来。 */
+function resolveChrome() {
+  const env = process.env.CHROME_PATH;
+  if (env && existsSync(env)) return env;
+  try { const p = chromium.executablePath(); if (p && existsSync(p)) return p; } catch { /* 继续找 */ }
+  const la = process.env.LOCALAPPDATA, pf = process.env.PROGRAMFILES;
+  const cands = process.platform === 'win32'
+    ? [la && join(la, 'Google\\Chrome\\Application\\chrome.exe'), pf && join(pf, 'Google\\Chrome\\Application\\chrome.exe'), pf && join(pf, 'Microsoft\\Edge\\Application\\msedge.exe')]
+    : process.platform === 'darwin'
+      ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+      : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium'];
+  const found = cands.filter(Boolean).find(p => existsSync(p));
+  if (!found) throw new Error('未找到可用的浏览器，请运行 npx playwright install chromium');
+  return found;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -54,7 +73,7 @@ const ok = (c, m, extra = '') => {
 };
 
 /* ---------- 启动浏览器 ---------- */
-const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+const browser = await chromium.launch({ executablePath: resolveChrome(), headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1600, height: 950 }, acceptDownloads: true });
 const page = await ctx.newPage();
 
@@ -65,7 +84,9 @@ page.on('requestfailed', r => errors.push('requestfailed: ' + r.url() + ' ' + (r
 
 console.log('\n=== 1. 页面加载 ===');
 await page.goto(BASE, { waitUntil: 'load' });
-await page.waitForTimeout(1200);
+// 等应用 boot 完（window.BlockAnim 就绪），而不是固定睡 1200ms
+await page.waitForFunction(() => !!window.BlockAnim, null, { timeout: 30000 }).catch(() => {});
+await page.waitForTimeout(300);   // boot 之后让首帧画完
 ok(errors.length === 0, '加载无 JS 报错', errors.slice(0, 3).join(' | '));
 
 /* ---------- 2. Boot 完成 ---------- */

@@ -45,9 +45,28 @@ const server = createServer(async (req, res) => {
   }
 });
 
+/* 端口被占是常事：上一次 npm start 没退干净、或本机 5173 已被别的服务用着。
+   没有 error 监听的话，EADDRINUSE 会变成未捕获异常直接把进程带走，
+   用户只看到一句看不懂的 ENOENT/EADDRINUSE，README 又让所有人 npm start。
+   这里给出可操作的提示，并支持 PORT=0（让系统分配空闲端口）。 */
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n  ✗ 端口 ${PORT} 已被占用。`);
+    console.error('    换一个端口：  PORT=5174 npm start');
+    console.error('    或先停掉占用该端口的程序。\n');
+  } else {
+    console.error('\n  ✗ 服务器启动失败：', err.message, '\n');
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
+  const actual = server.address().port;
   console.log(`\n  积木动画工厂 · V0 原型`);
-  console.log(`  → http://localhost:${PORT}\n`);
+  console.log(`  → http://localhost:${actual}\n`);
   console.log(`  自测：在页面控制台执行 import('./src/selftest.js').then(m => m.run())`);
   console.log(`  快捷键：空格播放 · F10 单步 · F9 断点 · Ctrl+Z 撤销\n`);
 });
+
+// 端口 0 时把实际端口打印出来，便于脚本抓取
+if (PORT === 0) console.log('PORT=' + server.address().port);

@@ -157,20 +157,54 @@ export class AudioSource {
 }
 
 /* ---------------- 执行上下文 ---------------- */
+/** 单帧总步数预算。
+ *  loop 的次数上限是「每层各自 500」，嵌套起来是乘积：3 层 500 = 1.25 亿次
+ *  语句执行（实测 27.6 秒卡死 UI），4 层直接算不完。所以除了每层的次数上限，
+ *  还必须有一道「整帧总量」的闸门 —— 它是唯一能拦住嵌套乘积的东西。
+ *  10 万步实测约 80ms，正常工程一帧只有几十到几百步，够用且能兜住爆炸。 */
+export const DEFAULT_MAX_STEPS = 100000;
+
+/** 变量键归一：`ctx.vars` 里一律用带 $ 的键（$time / $score），
+ *  而 IR 里的变量名是裸名（`{k:'var',name:'score'}`、`VAR score …`）。
+ *  两边都过这里归一，所以 $score 和 score 命中同一个值。 */
+function normVarKey(k) {
+  const s = String(k == null ? '' : k);
+  return s.startsWith('$') ? s : '$' + s;
+}
+
 export class EvalContext {
   constructor(ir, time, audio, hooks = {}) {
     this.ir = ir;
     this.t = time;
     this.audio = audio;
-    this.hooks = hooks;         // {onBlock, onVar}
+    this.hooks = hooks;         // {onBlock, onVar, maxSteps}
     this.vars = new Map();
+    // 工程声明的变量（IR: {id,name,type,value}）—— 原实现从不载入，
+    // 于是 ctx.vars 里只有三个内置量，用户变量在表达式里永远取不到（恒为 0）。
+    // 先载入变量、再注入内置量：$time/$frame/$progress 是引擎语义，同名变量不覆盖它们。
+    for (const v of ir.variables || []) {
+      if (!v || !v.name) continue;
+      this.vars.set(normVarKey(v.name), v.value === undefined ? '' : v.value);
+    }
     this.vars.set('$time', time);
     this.vars.set('$frame', Math.round(time * ir.project.fps));
     this.vars.set('$progress', ir.project.duration > 0 ? clamp01(time / ir.project.duration) : 0);
     this.steps = 0;
+    this.stepBudget = Number.isFinite(hooks.maxSteps) && hooks.maxSteps > 0 ? hooks.maxSteps : DEFAULT_MAX_STEPS;
+    this.budgetExceeded = false;   // 本帧是否因超出预算被截断
   }
-  setVar(k, v) { this.vars.set(k, v); this.hooks.onVar && this.hooks.onVar(k, v); }
-  getVar(k) { return this.vars.get(k); }
+  setVar(k, v) {
+    const key = normVarKey(k);
+    this.vars.set(key, v);
+    this.hooks.onVar && this.hooks.onVar(key, v);
+  }
+  getVar(k) { return this.vars.get(normVarKey(k)); }
+  /** 还有预算吗？没有就记下「被截断」并返回 false */
+  hasBudget() {
+    if (this.steps < this.stepBudget) return true;
+    this.budgetExceeded = true;
+    return false;
+  }
 }
 
 /* ---------------- 表达式求值 ---------------- */
@@ -194,7 +228,10 @@ export function evalExpr(e, ctx) {
     case 'var': {
       const v = ctx.getVar(e.name);
       if (v === undefined) return 0;
-      if (typeof v === 'object' && v && 'v' in v) return evalExpr(v, ctx);
+      // 只有真正的字面量节点才展开。原实现是 `'v' in v`，
+      // 于是用户存进去的任何带 v 字段的对象（比如 {v: 42}）都被当成
+      // 字面量再求值一次，取到的却是它自己的 v —— 用户拿到的不是他存的值。
+      if (v && typeof v === 'object' && v.k === 'lit') return evalExpr(v, ctx);
       return v;
     }
     case 'audio': {
@@ -275,6 +312,28 @@ export function num(v, fb = 0) {
   return fb;
 }
 
+/* 文本里的 $变量 插值。
+ * 语义：`$名字` 取当前帧 ctx 里的变量值（含 $time/$frame/$progress）。
+ * 不动的两类，都是有意的：
+ *   · 未声明的名字原样保留 —— 用户正文写 "$abc" 不该被静默吃掉；
+ *   · `$data.键` 是数据面板的绑定语法，后面跟 `.` 就整段留给它。
+ * 取值走 evalExpr({k:'var'})，和表达式里的变量引用同一条路径，
+ * 保证「文本里显示的值」和「表达式里算出的值」永远一致。 */
+const VAR_TOKEN = /\$([A-Za-z_]\w*)/g;
+export function interpolateVars(str, ctx) {
+  const s = String(str == null ? '' : str);
+  if (s.indexOf('$') < 0) return s;
+  return s.replace(VAR_TOKEN, (all, name, offset) => {
+    if (s[offset + all.length] === '.') return all;   // $data.键 归数据面板
+    // 注意不能直接用 evalExpr 判空：它对未定义变量返回 0，
+    // 那样「没声明的 $abc」会被替换成 0 而不是原样保留。
+    if (ctx.getVar(name) === undefined) return all;
+    const v = evalExpr({ k: 'var', name }, ctx);
+    if (v === undefined || v === null) return all;
+    return String(v);
+  });
+}
+
 /* ============================================================
    场景状态（每帧新建，纯数据）
    ============================================================ */
@@ -309,6 +368,27 @@ function resolveTarget(ctx, sel, curLayerId) {
   return curLayerId;
 }
 
+/**
+ * 判断「第 0 个槽是不是图层选择槽」——决定按哪种参数布局读。
+ *
+ * 背景：`repeater` / `particles` 在 `blocks.js` 里**没有图层槽**
+ * （repeater 是 份数/间距/错峰/起始/起始高度，particles 是 粒子数/起始/时长/颜色/速度），
+ * 但 `templates.js` 里这两个积木是**带图层名**的写法：
+ *   blk('repeater',  [L('重复条'), N(14), N(92), ...])
+ *   blk('particles', [L('粒子'),  N(140), ...])
+ * 于是存在两套语义。原先 evaluator 只认 6 参数写法，面板拖出来的 5 槽积木
+ * 被整体错一位读（份数读成间距、间距读成错峰…），用户填的值全被吃错。
+ *
+ * 判别必须稳：只有当第 0 槽**确实指向一个存在的图层**（按名字或 id 命中）
+ * 才认为它是图层槽。用户填的「8」不会撞上任何图层名，所以走 5 参数路径。
+ */
+function hasLayerSlot(sel, ctx) {
+  if (sel === undefined || sel === null || sel === '') return false;
+  const s = String(sel);
+  if (s === '@current') return true;
+  return ctx.ir.layers.some(l => l.name === s || l.id === s);
+}
+
 /* ============================================================
    语句执行
    返回 true 表示该语句「消费」了时间（后续语句的基准时间被推进）
@@ -335,6 +415,12 @@ export function execBlock(b, ctx, state, curLayerId, t) {
   const op = b.op;
   const def = defOf(op);
   ctx.steps++;
+  // 预算用尽：不再执行任何语句。截断是「本帧到此为止」，不是报错 ——
+  // 预览可以继续跑下一帧，比让界面卡死几十秒强。
+  if (ctx.steps > ctx.stepBudget) {
+    ctx.budgetExceeded = true;
+    return t;
+  }
   if (ctx.hooks.onBlock) ctx.hooks.onBlock(b, def, ctx.t, t);
 
   const S = (idx) => (b.slots && b.slots[idx] ? b.slots[idx].value : undefined);
@@ -372,6 +458,9 @@ export function execBlock(b, ctx, state, curLayerId, t) {
       const n = Math.max(0, Math.min(500, Math.round(num(E(0), 1))));
       let cur = t;
       for (let i = 0; i < n; i++) {
+        // 每层 500 的上限挡不住嵌套（500ⁿ）。整个循环必须受同一帧预算约束，
+        // 否则 3 层就是 1.25 亿次 → 界面卡死几十秒，用户以为程序崩了。
+        if (!ctx.hasBudget()) break;
         const end = execBlocks(S(1), ctx, state, curLayerId, cur);
         cur = Math.max(cur, end);
       }
@@ -399,7 +488,7 @@ export function execBlock(b, ctx, state, curLayerId, t) {
       const lid = resolveTarget(ctx, String(E(0) ?? ''), curLayerId);
       const ls = state.layers[lid];
       if (!ls) return t;
-      const content = S(1) === undefined ? null : String(evalExpr(S(1), ctx) ?? '');
+      const content = S(1) === undefined ? null : interpolateVars(String(evalExpr(S(1), ctx) ?? ''), ctx);
       if (content !== null && content !== '') ls.p.text = content;
       ls.visible = true;
       if (ls.text === null || ls.text === undefined) ls.text = buildUnits(String(ls.p.text), ls.splitUnit);
@@ -409,8 +498,18 @@ export function execBlock(b, ctx, state, curLayerId, t) {
       const lid = resolveTarget(ctx, String(E(0) ?? ''), curLayerId);
       const ls = state.layers[lid];
       if (!ls) return t;
-      ls.p.text = String(evalExpr(S(1), ctx) ?? '');
+      ls.p.text = interpolateVars(String(evalExpr(S(1), ctx) ?? ''), ctx);
       ls.text = buildUnits(ls.p.text, ls.splitUnit);
+      return t;
+    }
+    /* ---------- 变量 ---------- */
+    case 'setVar': {
+      // 「写变量」：把值写进本帧上下文，供后续表达式与文本插值读取。
+      // 变量名是裸名（IR 里 name 不带 $），setVar 内部归一到 $name。
+      // 没写名字就什么都不做 —— 静默写一个空名变量会让调试面板出现诡异条目。
+      const name = String(evalExpr(S(0), ctx) ?? '').trim();
+      if (!name) return t;
+      ctx.setVar(name, evalExpr(S(1), ctx));
       return t;
     }
     case 'splitBy': {
@@ -605,14 +704,19 @@ export function execBlock(b, ctx, state, curLayerId, t) {
       return t;
     }
     case 'repeater': {
-      const lid = resolveTarget(ctx, String(E(0) ?? ''), curLayerId);
+      // 两套语义：模板写法带图层槽（6 参数），面板写法不带（5 参数）。
+      // 按第 0 槽是否指向真实图层来判别，见 hasLayerSlot 的说明。
+      const raw0 = S(0);
+      const withLayer = hasLayerSlot(raw0 === undefined ? undefined : evalExpr(raw0, ctx), ctx);
+      const base = withLayer ? 1 : 0;
+      const lid = withLayer ? resolveTarget(ctx, String(evalExpr(raw0, ctx) ?? ''), curLayerId) : curLayerId;
       const ls = state.layers[lid];
       if (!ls) return t;
-      const n = Math.max(1, Math.min(120, Math.round(num(E(1), 8))));
-      const spacing = num(E(2), 90);
-      const gap = Math.max(0, num(E(3), 0.06));
-      const start = Math.max(0, num(E(4), 0));
-      const h0 = Math.max(0, num(E(5), 20));
+      const n = Math.max(1, Math.min(120, Math.round(num(E(base), 8))));
+      const spacing = num(E(base + 1), 90);
+      const gap = Math.max(0, num(E(base + 2), 0.06));
+      const start = Math.max(0, num(E(base + 3), 0));
+      const h0 = Math.max(0, num(E(base + 4), 20));
       const items = [];
       for (let i = 0; i < n; i++) {
         const s = start + i * gap;
@@ -649,14 +753,18 @@ export function execBlock(b, ctx, state, curLayerId, t) {
       return t;
     }
     case 'particles': {
-      const lid = resolveTarget(ctx, String(E(0) ?? ''), curLayerId);
+      // 同 repeater：模板带图层槽（6 参数），面板不带（5 参数）
+      const raw0 = S(0);
+      const withLayer = hasLayerSlot(raw0 === undefined ? undefined : evalExpr(raw0, ctx), ctx);
+      const base = withLayer ? 1 : 0;
+      const lid = withLayer ? resolveTarget(ctx, String(evalExpr(raw0, ctx) ?? ''), curLayerId) : curLayerId;
       const ls = state.layers[lid];
       if (!ls) return t;
-      const n = Math.max(4, Math.min(400, Math.round(num(E(1), 90))));
-      const start = Math.max(0, num(E(2), 0));
-      const dur = Math.max(0.1, num(E(3), 3));
-      const col = String(evalExpr(S(4), ctx) ?? '#4a8cff');
-      const speed = num(E(5), 180);
+      const n = Math.max(4, Math.min(400, Math.round(num(E(base), 90))));
+      const start = Math.max(0, num(E(base + 1), 0));
+      const dur = Math.max(0.1, num(E(base + 2), 3));
+      const col = String(evalExpr(S(base + 3), ctx) ?? '#4a8cff');
+      const speed = num(E(base + 4), 180);
       const ps = [];
       for (let i = 0; i < n; i++) {
         const ang = hash2(i, 1.7) * Math.PI * 2;
@@ -764,7 +872,7 @@ export function evaluateFrame(ir, t, audio, hooks = {}) {
     const ls = state.layers[layer.id];
     ls.visible = !!layer.visible;
     ls.p = Object.assign({}, layer.props);
-    ls.text = buildUnits(String(layer.props.text ?? ''), 'whole');
+    ls.text = buildUnits(String(ls.p.text ?? ''), 'whole');
   }
 
   // 自定义积木（函数）在求值前做宏展开 —— 求值器不需要认识 custom.* 的 op
@@ -783,6 +891,24 @@ export function evaluateFrame(ir, t, audio, hooks = {}) {
       }
     }
     execBlocks(blocks, ctx, state, layer.id, 0);
+  }
+
+  // 文字里的 $变量 在**全部积木执行完之后**统一插值一次。
+  // 为什么不能放在上面初始化时：那样「先 setVar 再显示文字」的写法读到的还是初值
+  // （积木还没跑）。也不能在 setText/showText 里就地插值 —— 它们只改写 p.text，
+  // 而没被积木碰过的图层仍需插值，两条路各插一次会互相打架。
+  // 只处理 text：其它属性位（fill/x…）保持字面量，避免把颜色串里的 $ 误当变量。
+  for (const layer of ir.layers) {
+    const ls = state.layers[layer.id];
+    const before = String(ls.p.text ?? '');
+    const after = interpolateVars(before, ctx);
+    if (after !== before) {
+      ls.p.text = after;
+      // 只有原本就没被积木拆过单元时才重建 units；已拆过的保持原拆分方式，
+      // 否则 typewriter/stagger 这类「逐字」动效会被整块覆盖成单元素。
+      if (!ls.text || ls.text.length <= 1) ls.text = buildUnits(after, ls.splitUnit || 'whole');
+      else if (ls.splitUnit === 'whole' || !ls.splitUnit) ls.text = buildUnits(after, 'whole');
+    }
   }
 
   // 数据驱动块生成的额外图层（图元不在 IR 图层树里时也能画）

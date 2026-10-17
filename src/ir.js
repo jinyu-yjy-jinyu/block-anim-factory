@@ -187,6 +187,28 @@ function fmtValue(v) {
   return '"' + escapeStr(String(v)) + '"';
 }
 
+/** VAR 行的值解码 —— 与 fmtValue 互逆。
+ *  旧实现 toText 写 `JSON.stringify(值)`，fromText 却一律包成字符串字面量
+ *  （`STR(原文)`），于是每存读一轮就多套一层转义：42 → "42" → "\"42\"" → …
+ *  用户的工程文件会被逐轮写坏（实测第 2 轮 ≠ 第 4 轮）。
+ *  改用与槽位值同一套编码（#数值 ~时间 c#颜色 !布尔 s选项 "字符串" $表达式），
+ *  存读才是严格互逆的。旧文件里的 JSON / 裸值形态在这里兼容读一次。 */
+function parseVarValue(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return STR('');
+  if (s[0] === '{' || s[0] === '[') {
+    try {
+      const j = JSON.parse(s);
+      if (j && typeof j === 'object' && j.k) return j;
+      return STR(s);
+    } catch { /* 不是 JSON，按普通值继续解析 */ }
+  }
+  if (/^-?\d+(?:\.\d+)?$/.test(s)) return NUM(parseFloat(s));
+  if (s === 'true') return BOOL(true);
+  if (s === 'false') return BOOL(false);
+  return parsePin(s);
+}
+
 function fmtExpr(e) {
   if (!e) return '#0';
   if (e.k === 'lit') return fmtValue(e);
@@ -267,7 +289,9 @@ export function toText(ir) {
   L.push('# 值编码: #数值 ~时间 c#颜色 !布尔 s选项 "字符串"');
   L.push('# 积木行以 @ 开头，`> n` 表示进入 C 形块的第 n 个子块槽');
   for (const m of ir.markers) L.push(`MARK ${m.time.toFixed(3)} ${m.label}`);
-  for (const v of ir.variables) L.push(`VAR ${v.name} ${JSON.stringify(v.v && v.v.k === 'lit' ? v.v.v : v.value)}`);
+  // 变量的值按「与槽位值同一套编码」写（见 parseVarValue 的说明）。
+  // 原实现写 JSON.stringify，与读取侧不对称，每存读一轮多套一层转义。
+  for (const v of ir.variables || []) L.push(`VAR ${v.name} ${fmtValue(v.value)}`);
   for (const layer of ir.layers) {
     L.push('');
     L.push(`LAYER ${escapeStr(layer.name)} [${layer.type}]${layer.visible ? '' : ' (隐藏)'}`);
@@ -348,7 +372,12 @@ export function fromText(text, blockDefs) {
     }
     if (s.startsWith('VAR ')) {
       const m = s.slice(4).trim().match(/^(\S+)\s*(.*)$/);
-      if (m) ir.variables.push({ id: uid('V'), name: m[1], type: 'any', value: STR(m[2] || '') });
+      // 值保留类型（原实现一律 STR(...)，数字/布尔/颜色全变成字符串）。
+      // 类型字段跟着值的 t 走，`type:'any'` 不再是无信息量占位。
+      if (m) {
+        const value = parseVarValue(m[2]);
+        ir.variables.push({ id: uid('V'), name: m[1], type: value && value.t ? value.t : 'any', value });
+      }
       continue;
     }
     if (s.startsWith('LAYER ')) {

@@ -160,6 +160,23 @@ function roundRect(ctx, x, y, w, h, r) {
 }
 
 const _imgCache = new Map();
+
+/* 失败重试间隔（毫秒）。失败的条目不是永久毒化：过了这个时间再取到它，
+   会重新发一次加载请求 —— 用户改了图片地址、网络恢复、或只是当时断了一下，
+   都不该让该槽位在本会话里永远画不出来。 */
+const IMG_RETRY_MS = 2000;
+
+/** 测试钩子：只读缓存，不暴露可写引用 */
+export function _imageCacheInfo() {
+  const out = [];
+  for (const [src, img] of _imgCache) {
+    out.push({ src, ok: !!img.ok, failed: !!img.failed, retries: img._retries || 0 });
+  }
+  return out;
+}
+/** 测试钩子：清空缓存（真实使用中不调用） */
+export function _clearImageCache() { _imgCache.clear(); }
+
 function drawImageLayer(ls, ctx) {
   const p = ls.p;
   if (!p.src) {
@@ -178,10 +195,24 @@ function drawImageLayer(ls, ctx) {
     return;
   }
   let img = _imgCache.get(p.src);
+  // 失败条目过了重试窗口就重新加载一次，避免一次失败永久毒化该槽位
+  if (img && img.failed && img._retryAt && Date.now() >= img._retryAt) {
+    img = undefined;
+    _imgCache.delete(p.src);
+  }
   if (img === undefined) {
     img = new Image();
-    img.onload = () => { img.ok = true; };
-    img.onerror = () => { img = { ok: false }; };
+    img.onload = () => { img.ok = true; img.failed = false; };
+    // 失败要写回「缓存里的那个对象」，不能重新赋值局部变量。
+    // 原实现 `img = { ok: false }` 只换了局部引用，缓存里仍是同一个
+    // 未标记的 Image —— 该 src 之后每次取出来都走「未就绪」分支，
+    // 永远修不好（用户重新填同一个地址也不会重试）。
+    img.onerror = () => {
+      img.ok = false;
+      img.failed = true;
+      img._retries = (img._retries || 0) + 1;
+      img._retryAt = Date.now() + IMG_RETRY_MS;
+    };
     img.src = p.src;
     _imgCache.set(p.src, img);
     if (!img.complete && img.naturalWidth) img.ok = true;

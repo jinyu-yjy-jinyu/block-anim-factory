@@ -64,6 +64,13 @@ export const BLOCK_DEFS = [
     isLeaf: false,
     slots: [P('sel', '标记名', '', { menu: 'markers' })],
   },
+  /* 变量：全库原本没有任何「写变量」的 op，于是 evaluator 的 setVar 零调用，
+     工程里声明的变量永远只能是初值。这里只新增这一个 op，不动任何已有 op。 */
+  {
+    op: 'setVar', cat: 'math', color: CATS.math.color, label: '设置变量', desc: '把值写进变量，后续表达式与文字里的 $变量 都能读到',
+    isLeaf: false,
+    slots: [P('str', '变量名', 'score', { placeholder: '不带 $，例如 score' }), P('num', '值', 0)],
+  },
 
   /* ---------------- 文字（语句） ---------------- */
   {

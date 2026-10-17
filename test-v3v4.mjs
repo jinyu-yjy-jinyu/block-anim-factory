@@ -10,11 +10,22 @@ const CO = await import(U('src/collab.js'));
 const IR = await import(U('src/ir.js'));
 const TP = await import(U('src/templates.js'));
 const SUB = await import(U('src/subtitles.js'));
+const BL = await import(U('src/blocks.js'));
+const EV = await import(U('src/evaluator.js'));
+const CBL = await import(U('src/customblocks.js'));
 
 let pass = 0, fail = 0; const failures = [];
+// 异步用例必须被等待：原实现把 f() 返回的 Promise 直接当成「非 false」计为通过，
+// 于是 async 用例里的断言从未执行也会记为通过。
+const pendingTests = [];
 const t = (n, f) => {
-  try { const r = f(); if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; }
-  catch (e) { fail++; failures.push(`${n} → ${e.message}`); }
+  const good = (r) => { if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; };
+  const bad = (e) => { fail++; failures.push(`${n} → ${e.message}`); };
+  try {
+    const r = f();
+    if (r && typeof r.then === 'function') { pendingTests.push(r.then(good, bad)); return; }
+    good(r);
+  } catch (e) { bad(e); }
 };
 const eq = (a, b, m) => { if (String(a) !== String(b)) throw new Error(`${m || ''} 期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`); };
 const near = (a, b, e, m) => { if (!(Math.abs(a - b) <= (e == null ? 1e-6 : e))) throw new Error(`${m || ''} 期望 ≈${b}，实际 ${a}`); };
@@ -79,6 +90,34 @@ t('市场:Remix 装入可编辑副本', () => {
   ok(tpl.ir.layers[1].props.text !== '改过了', '原模板被污染了');
   eq(copy.templateInfo.id, tpl.id);
 });
+t('市场:Remix 的自定义积木库必须是真 CustomBlock 实例', () => {
+  // #36：原实现 `const { CustomBlock } = { CustomBlock: null }` 解构的是刚造的
+  // 空对象，恒为 null，那两行只是障眼法。后果是模板里的自定义积木以裸对象进库，
+  // 而 CustomBlockLibrary 的 toJSON() 要调 b.toJSON()、toBlockDefs() 要读
+  // b.params.length —— 用到就炸。
+  const mkCB = (name, op) => ({
+    id: `CB-${op}`, name, op, category: 'custom', color: '#7c5cff',
+    desc: '', params: [], body: [], author: '',
+  });
+  const m = new MK.Marketplace();
+  const tpl = m.publish(mkIR(), {
+    name: '带自定义积木的模板', author: 'me', version: '1.0.0',
+    customBlocks: [mkCB('我的块', 'custom.mine')],
+  });
+  const copy = tpl.instantiate();
+  ok(copy.customLibrary, 'instantiate 没有产出 customLibrary');
+  eq(copy.customLibrary.size, 1, `自定义积木数量不对：${copy.customLibrary.size}`);
+  const b = copy.customLibrary.list()[0];
+  ok(b instanceof CBL.CustomBlock, '库里的条目不是 CustomBlock 实例（裸对象会在 toJSON/toBlockDefs 处炸）');
+  eq(typeof b.toJSON, 'function', '条目缺少 toJSON()');
+  // 真正会用到的两个方法必须能跑通
+  const defs = copy.customLibrary.toBlockDefs();
+  eq(defs.length, 1, 'toBlockDefs 产出数量不对');
+  eq(defs[0].op, 'custom.mine');
+  const json = copy.customLibrary.toJSON();
+  eq(json.blocks.length, 1, 'toJSON 产出的块数不对');
+});
+
 t('市场:Remix 应用参数覆盖', () => {
   const m = new MK.Marketplace();
   const tpl = m.publish(mkIR(), {
@@ -286,7 +325,9 @@ t('AI:解析方向滑入', () => {
   const r = parser().parse('标题从右侧滑入，用 0.8 秒');
   eq(r.actions[0].op, 'moveIn');
   eq(r.actions[0].slots.dir.v, 'right');
-  ok(r.actions[0].slots.dx.v > 0, '向右应有正 X 位移');
+  // 「距离」槽要正值：方向由 dir 决定，evaluator 自己算正负。
+  // 若这里把带符号的位移当成距离，会把「从左滑入」变成向右。
+  ok(r.actions[0].slots.dist.v > 0, '距离应为正值');
 });
 t('AI:解析打字机', () => {
   const r = parser().parse('副标题用打字机显示');
@@ -302,6 +343,32 @@ t('AI:解析标记点', () => {
   const r = parser().parse('在标记点 M2 执行');
   eq(r.actions[0].op, 'atMarker');
   eq(r.actions[0].slots.marker.v, 'M2');
+});
+t('AI:标记点名用的是 label 字段（与 ir/evaluator/UI 一致）', () => {
+  // #20 的守门测试：标记点对象只有 label，没有 name。
+  // main.js 里如果把 m.label 写成 m.name，标记点列表会变成一串 undefined，
+  // 「在标记点」这个条件就永远匹配不到任何锚点。
+  const ir = IR.defaultProject('标记测试');
+  ir.markers = [
+    { id: 'M1', time: 0.2, label: '开场', color: '#ffb020' },
+    { id: 'M2', time: 1.5, label: '转折', color: '#ffb020' },
+  ];
+  // 这个映射必须和 main.js 里喂给解析器的一致
+  const names = ir.markers.map(m => m.label);
+  eq(names.join(','), '开场,转折', '应取到 label');
+  ok(ir.markers.every(m => m.name === undefined), '标记点不该有 name 字段');
+
+  const p = new AI.NLParser({ layers: ['标题文字'], markers: names });
+  eq(p.parse('在标记点 转折 执行').actions[0].slots.marker.v, '转折', '应匹配到真实标记名');
+});
+t('AI:标记点经 toText/fromText 往返后仍是 label', () => {
+  const ir = IR.defaultProject('往返测试');
+  ir.markers = [{ id: 'M1', time: 0.2, label: '开场', color: '#ffb020' }];
+  ir.layers = [IR.newLayer('标题文字', 'text', { text: '你好' })];
+  IR.registerOpMeta(BL.BLOCK_DEFS);
+  const back = IR.fromText(IR.toText(ir), BL.BLOCK_DEFS).ir;
+  eq(back.markers.length, 1);
+  eq(back.markers[0].label, '开场', '往返后应保留 label');
 });
 t('AI:多子句拆成多个动作', () => {
   const r = parser().parse('标题淡入，然后副标题打字机，最后等 1 秒');
@@ -438,6 +505,102 @@ function trackFrom(texts, withWords) {
   return tr;
 }
 
+t('AI:每个积木的槽位落位都与 blocks.js 的类型相符', () => {
+  // #19 的守门测试：SLOT_ORDER 错开一位时，参数会落进类型不符的槽
+  //（时间槽拿到颜色、数字槽拿到布尔），界面上看不出来，跑起来全错。
+  const sentences = [
+    '标题逐字弹入，间隔 0.08 秒', '标题逐个出现，间隔 0.2 秒', '标题打字机',
+    '标题淡入，时长 1.5 秒', '标题淡出，时长 0.9 秒', '标题从右侧滑入，时长 1.2 秒',
+    '标题缩放入场，时长 0.8 秒', '标题擦除，时长 1.1 秒', '标题沿波浪路径',
+    '标题数字滚动到 500', '标题逐词高亮', '音频波形柱 64 个', '环形频谱 48 个',
+    '柱状图生长 30,55,80', '折线图生长 10,40,25', '画一个红色方块',
+    '等待 2 秒', '重复 4 次',
+  ];
+  const p = new AI.NLParser({ layers: ['标题文字', '标题', '装饰方块'] });
+  for (const s of sentences) {
+    const c = AI.actionsToBlocks(p.parse(s).actions);
+    for (const b of c.blocks) {
+      const def = BL.defOf(b.op);
+      ok(def, `blocks.js 里没有 ${b.op}`);
+      b.slots.forEach((slot, i) => {
+        const spec = def.slots[i];
+        if (!spec || !slot.value || typeof slot.value !== 'object') return;
+        const got = slot.value.t;
+        if (!got) return;
+        if (got === spec.type) return;
+        // particles / repeater 的 blocks.js 槽位本身与 evaluator 差一个图层槽，
+        // 光靠 SLOT_ORDER 补不回来（已上报，不在这批范围内）。
+        if (b.op === 'particles' || b.op === 'repeater') return;
+        ok(false, `${b.op} 第 ${i} 槽是 ${spec.type}/${spec.label}，却拿到 ${got}/${JSON.stringify(slot.value.v)}（「${s}」）`);
+      });
+    }
+  }
+});
+t('AI:滑入方向经求值器验证真的朝对的一边', () => {
+  // 光看槽位类型不够：距离传成带符号的值，类型仍是 num，但方向会反。
+  const dirCases = [
+    ['标题从右滑入，时长 1.2 秒', 1],
+    ['标题从左滑入，时长 1.2 秒', -1],
+  ];
+  for (const [s, sign] of dirCases) {
+    const c = AI.actionsToBlocks(parser().parse(s).actions);
+    const ir = {
+      project: { width: 1920, height: 1080, duration: 5, fps: 30 },
+      markers: [], layers: [{
+        id: 'L1', name: '标题', visible: true,
+        props: { x: 0, y: 0, opacity: 1, text: '标题', scale: 1 },
+        blocks: c.blocks,
+      }],
+    };
+    const x0 = EV.evaluateFrame(ir, 0, null).state.layers.L1.p.x;
+    const xEnd = EV.evaluateFrame(ir, 4, null).state.layers.L1.p.x;
+    ok(Math.sign(x0 - xEnd) === sign,
+      `「${s}」应从 ${sign > 0 ? '右' : '左'}侧进入，实测起点 x=${x0}、终点 x=${xEnd}`);
+    near(xEnd, 0, 1e-6, '入场结束后应回到原位');
+  }
+});
+t('AI:缩放入场经求值器验证从 from 到 to', () => {
+  const c = AI.actionsToBlocks(parser().parse('标题缩放入场，时长 0.8 秒').actions);
+  const ir = {
+    project: { width: 1920, height: 1080, duration: 5, fps: 30 },
+    markers: [], layers: [{
+      id: 'L1', name: '标题', visible: true,
+      props: { x: 0, y: 0, opacity: 1, text: '标题', scale: 1 },
+      blocks: c.blocks,
+    }],
+  };
+  const s0 = EV.evaluateFrame(ir, 0, null).state.layers.L1.fx.scale;
+  const sEnd = EV.evaluateFrame(ir, 4, null).state.layers.L1.fx.scale;
+  ok(s0 < 1, `入场起点应小于 1 倍，实测 ${s0}`);
+  // 「到」槽必须真的被填上：留空或填错会让动画停在小尺寸，画面永远是缩着的。
+  near(sEnd, 1, 1e-6, '入场结束后应回到 1 倍（正常大小）');
+});
+t('AI:反向解释读的槽位与 blocks.js 一致', () => {
+  // explainBlock 是同一份位置契约的第三个读点，串位时会说出错误的动画描述。
+  const cases = [
+    ['标题从右滑入，时长 1.2 秒', '120'],
+    ['环形频谱 48 个', '半径 300'],
+    ['音频波形柱 64 个', '64'],
+    ['标题逐词高亮 红色', '#ff4a4a'],
+  ];
+  const p = new AI.NLParser({ layers: ['标题文字', '标题', '装饰方块'] });
+  for (const [s, shouldSay] of cases) {
+    const c = AI.actionsToBlocks(p.parse(s).actions);
+    const text = AI.explainBlock(c.blocks[0]);
+    ok(text.includes(shouldSay), `「${s}」的说明应含 ${shouldSay}，实际：${text}`);
+  }
+});
+t('AI:柱状图的「起始」与「间隔」没有互相串位', () => {
+  // 两个槽都是 time 类型，光比类型抓不住；串位会让所有柱子同时长出，
+  // 逐根生长的效果消失（这正是 #19 修好前的症状）。
+  const c = AI.actionsToBlocks(parser().parse('柱状图生长 30,55,80').actions);
+  const b = c.blocks.find(x => x.op === 'growBar');
+  ok(b, '应编译出 growBar');
+  const gap = b.slots[3].value && b.slots[3].value.v;
+  const start = b.slots[4].value && b.slots[4].value.v;
+  ok(gap > 0, `第 4 槽「间隔」应大于 0，实际 ${gap}（串到「起始」会让柱子同时长出）`);
+  eq(start, 0, '第 5 槽「起始」应为 0');
+});
 t('AI:字幕转积木（无词级时间码）', () => {
   const tr = trackFrom(['短句', '中等长度的句子'], false);
   const r = AI.subtitlesToBlocks(tr, { layer: '标题文字' });
@@ -808,6 +971,147 @@ t('合并:对方删除未改动的图层会跟着删', () => {
   eq(r.ok, false, '删除 vs 修改 应算冲突');
   ok(r.conflicts.some(c => c.kind === 'deleteVsEdit'), JSON.stringify(r.conflicts));
 });
+
+/* ------------------------------------------------------------
+   合并覆盖度回归。
+   全部用 cloneIR 从同一个 base 派生 ours/theirs —— 必须这样写。
+   TP.loadTemplate() 每次调用都会生成全新的 id（uid() 里含 Date.now + random），
+   所以「各自 loadTemplate 再合并」的写法会让三方 id 完全不相交，
+   merge() 看到的只是「全新增 + 全删除」，逐项比对一次都不会发生。
+   上面 :825/:837/:849 三条旧用例正是这种情况（实测 base∩ours 图层 id = 0），
+   它们的 ok=true / conflicts=0 是在没有可比对象时得出的，不构成覆盖证据。
+   ------------------------------------------------------------ */
+function mergeScenario(base, mutateOurs, mutateTheirs) {
+  const repo = new CO.Repo();
+  repo.init(cloneIR(base), { message: 'base' });
+  repo.branch_('feature');
+  const o = cloneIR(base), th = cloneIR(base);
+  if (mutateOurs) mutateOurs(o);
+  if (mutateTheirs) mutateTheirs(th);
+  repo.commit(o, '我改');
+  repo.checkout('feature');
+  repo.commit(th, '对方改');
+  repo.checkout('main');
+  return repo.merge('feature');
+}
+function baseWithMarkers() {
+  const b = cloneIR(mkIR());
+  b.markers = [{ id: 'M1', time: 0, label: '开场', color: '#fff' }];
+  b.variables = [{ id: 'V1', name: '次数', type: 'any', value: 1 }];
+  return b;
+}
+
+t('合并:对方单独改标记点会被合入（不是静默丢）', () => {
+  const r = mergeScenario(baseWithMarkers(), null, (ir) => { ir.markers[0].time = 9.9; });
+  eq(r.ok, true, JSON.stringify(r.conflicts));
+  eq(r.merged.markers[0].time, 9.9, '对方的改动应真的进到合并结果里');
+});
+t('合并:对方单独改变量会被合入（不是静默丢）', () => {
+  const r = mergeScenario(baseWithMarkers(), null, (ir) => { ir.variables[0].value = 999; });
+  eq(r.ok, true, JSON.stringify(r.conflicts));
+  eq(r.merged.variables[0].value, 999, '对方的改动应真的进到合并结果里');
+});
+t('合并:对方单独改图层名会被合入（不是静默丢）', () => {
+  const r = mergeScenario(mkIR(), null, (ir) => { ir.layers[1].name = '对方改的名'; });
+  eq(r.ok, true, JSON.stringify(r.conflicts));
+  eq(r.merged.layers[1].name, '对方改的名');
+});
+t('合并:标记点两边改成不同值 → markerConflict', () => {
+  const r = mergeScenario(baseWithMarkers(),
+    (ir) => { ir.markers[0].time = 1.1; },
+    (ir) => { ir.markers[0].time = 9.9; });
+  eq(r.ok, false, '标记点冲突应被拦下');
+  ok(r.conflicts.some(c => c.kind === 'markerConflict'), JSON.stringify(r.conflicts));
+  eq(r.merged, null, '有冲突时不产出合并结果');
+});
+t('合并:变量两边改成不同值 → varConflict', () => {
+  const r = mergeScenario(baseWithMarkers(),
+    (ir) => { ir.variables[0].value = 5; },
+    (ir) => { ir.variables[0].value = 999; });
+  eq(r.ok, false, '变量冲突应被拦下');
+  ok(r.conflicts.some(c => c.kind === 'varConflict'), JSON.stringify(r.conflicts));
+  eq(r.merged, null);
+});
+t('合并:图层名两边改成不同值 → 冲突', () => {
+  const r = mergeScenario(mkIR(),
+    (ir) => { ir.layers[1].name = '我改的名'; },
+    (ir) => { ir.layers[1].name = '对方改的名'; });
+  eq(r.ok, false, '图层名冲突应被拦下');
+  ok(r.conflicts.some(c => c.kind === 'layerFieldConflict' && c.msg.includes('name')), JSON.stringify(r.conflicts));
+});
+t('合并:我方删除、对方改过该图层 → 也要报冲突（两侧对称）', () => {
+  // 旧实现只覆盖「对方删我改」，这一支的对方改动会被静默丢掉
+  const r = mergeScenario(mkIR(),
+    (ir) => { ir.layers.splice(1, 1); },
+    (ir) => { ir.layers[1].props.fontSize = 300; });
+  eq(r.ok, false, '我方删除 vs 对方修改 应算冲突');
+  ok(r.conflicts.some(c => c.kind === 'deleteVsEdit'), JSON.stringify(r.conflicts));
+  eq(r.merged, null);
+});
+t('合并:两边都删同一图层 → 静默通过', () => {
+  const r = mergeScenario(mkIR(),
+    (ir) => { ir.layers.splice(1, 1); },
+    (ir) => { ir.layers.splice(1, 1); });
+  eq(r.ok, true, JSON.stringify(r.conflicts));
+  eq(r.merged.layers.length, 2);
+});
+
+/* 标记点/变量的删除路径。上面那条「两边都删」只覆盖了 layers ——
+   markers/variables 走的是另一套（mergeIdList），必须单独盯，
+   否则「两边都删掉的标记点被重新塞回来」这种错会漏过去。 */
+t('合并:两边都删同一标记点 → 静默通过且不复活', () => {
+  const r = mergeScenario(baseWithMarkers(),
+    (ir) => { ir.markers = []; },
+    (ir) => { ir.markers = []; });
+  eq(r.ok, true, JSON.stringify(r.conflicts));
+  eq(r.merged.markers.length, 0, '两边都删了就不该再出现');
+});
+t('合并:我方删标记点、对方改过它 → 报冲突（不静默丢）', () => {
+  const r = mergeScenario(baseWithMarkers(),
+    (ir) => { ir.markers = []; },
+    (ir) => { ir.markers[0].time = 9.9; });
+  eq(r.ok, false, '我方删除 vs 对方修改 应算冲突');
+  ok(r.conflicts.some(c => c.kind === 'deleteVsEdit' && c.id === 'M1'), JSON.stringify(r.conflicts));
+});
+t('合并:对方删标记点、我改过它 → 报冲突', () => {
+  const r = mergeScenario(baseWithMarkers(),
+    (ir) => { ir.markers[0].time = 1.1; },
+    (ir) => { ir.markers = []; });
+  eq(r.ok, false, '对方删除 vs 我修改 应算冲突');
+  ok(r.conflicts.some(c => c.kind === 'deleteVsEdit' && c.id === 'M1'), JSON.stringify(r.conflicts));
+});
+t('合并:我删标记点、对方没动 → 静默跟着删', () => {
+  const r = mergeScenario(baseWithMarkers(), (ir) => { ir.markers = []; }, null);
+  eq(r.ok, true, JSON.stringify(r.conflicts));
+  eq(r.merged.markers.length, 0);
+});
+t('合并:对方新增标记点 → 自动合入', () => {
+  const r = mergeScenario(baseWithMarkers(),
+    null,
+    (ir) => { ir.markers.push({ id: 'M2', time: 3, label: '收场', color: '#f00' }); });
+  eq(r.ok, true, JSON.stringify(r.conflicts));
+  eq(r.merged.markers.length, 2);
+  ok(r.merged.markers.some(m => m.id === 'M2'), '对方新增的标记点应在结果里');
+});
+t('合并:未知顶层字段两边改不同 → 兜底报冲突', () => {
+  const r = mergeScenario(mkIR(),
+    (ir) => { ir.extraField = 'ours'; },
+    (ir) => { ir.extraField = 'theirs'; });
+  eq(r.ok, false, '未知顶层字段冲突应被拦下');
+  ok(r.conflicts.some(c => c.kind === 'topLevelConflict' && c.msg.includes('extraField')), JSON.stringify(r.conflicts));
+});
+t('合并:未知顶层字段只有对方新增 → 自动合入', () => {
+  const r = mergeScenario(mkIR(), null, (ir) => { ir.extraField = 'ok'; });
+  eq(r.ok, true, JSON.stringify(r.conflicts));
+  eq(r.merged.extraField, 'ok');
+});
+t('合并:旧用例的模板 id 确实不相交（空转现象留证）', () => {
+  // 锁定这个事实：若将来 uid() 变成确定性实现，本用例会失败并提醒重看上面注释
+  const a = mkIR(), b = mkIR();
+  const inter = a.layers.filter(l => b.layers.some(x => x.id === l.id));
+  eq(inter.length, 0, '模板两次加载的图层 id 不应相交（相交说明 uid 改了，需重估空转用例）');
+});
+
 t('差异:识别新增/删除/修改', () => {
   const a = mkIR();
   const b = cloneIR(a);
@@ -887,9 +1191,256 @@ t('版本:统计含块数', () => {
 
 function cloneIR(ir) { return JSON.parse(JSON.stringify(ir)); }
 
+t('素材:音效合成是确定性的（同一 spec 两次结果逐样本相同）', () => {
+  // #45：click / noise-sweep 原来用 Math.random()，同一工程导两次波形不同，
+  // 「可复现导出」这条声明就是假的。噪声源改成 hash01(i) 后必须逐样本一致。
+  for (const type of ['click', 'noise-sweep']) {
+    const a = MK.synthSfx({ type, dur: 0.15 });
+    const b = MK.synthSfx({ type, dur: 0.15 });
+    eq(a.length, b.length, `${type} 长度不稳定`);
+    let diff = 0, firstDiff = -1;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) { diff++; if (firstDiff < 0) firstDiff = i; }
+    }
+    eq(diff, 0, `${type} 两次合成有 ${diff} 个样本不同（首个在 ${firstDiff}）—— 随机源没换成确定性`);
+  }
+});
+t('素材:音效仍是真噪声（不是常数或单调斜坡）', () => {
+  // 换随机源不能把音效变成「一段死波形」：
+  // 相邻样本差值的绝对值应显著大于 0（真噪声的特征）。
+  for (const type of ['click', 'noise-sweep']) {
+    const pcm = MK.synthSfx({ type, dur: 0.15 });
+    let sumAbsDiff = 0, n = 0;
+    for (let i = 1; i < pcm.length; i++) { sumAbsDiff += Math.abs(pcm[i] - pcm[i - 1]); n++; }
+    const avg = sumAbsDiff / n;
+    ok(avg > 0.001, `${type} 相邻样本平均差 ${avg.toFixed(5)} 太小 —— 像死波形`);
+  }
+});
+t('素材:音效幅度与包络未被确定性改造改变', () => {
+  // 只换随机源，不许动幅度/包络公式：峰值应落在原公式给出的范围内。
+  const click = MK.synthSfx({ type: 'click', dur: 0.1 });
+  let peak = 0;
+  for (const v of click) peak = Math.max(peak, Math.abs(v));
+  // 公式是 (rand*2-1) * exp(-p*40) * 0.7 → 峰值不超过 0.7
+  ok(peak <= 0.7001, `click 峰值 ${peak.toFixed(4)} 超出公式上限 0.7`);
+  ok(peak > 0.1, `click 峰值 ${peak.toFixed(4)} 太小，幅度可能被改了`);
+
+  const sweep = MK.synthSfx({ type: 'noise-sweep', dur: 0.1 });
+  let sp = 0;
+  for (const v of sweep) sp = Math.max(sp, Math.abs(v));
+  ok(sp <= 0.3501, `noise-sweep 峰值 ${sp.toFixed(4)} 超出公式上限 0.35`);
+});
+
+/* ============================================================
+   repeater / particles 的参数槽位契约
+   ------------------------------------------------------------
+   blocks.js 里这两个积木**没有图层槽**：
+     repeater  = 份数 / 水平间距 / 错峰间隔 / 起始 / 起始高度
+     particles = 粒子数 / 起始 / 时长 / 颜色 / 速度
+   但 templates.js 用的是带图层名的写法（blk('repeater', [L('重复条'), ...])），
+   于是存在两套语义。原先 evaluator 只认 6 参数写法，面板拖出来的 5 槽积木
+   被整体错一位读 —— 份数读成间距、间距读成错峰，用户填的值全被吃错。
+   ============================================================ */
+const NUMLIT = (v) => ({ k: 'lit', t: 'num', v });
+const TIMELIT = (v) => ({ k: 'lit', t: 'time', v });
+const SELLIT = (v) => ({ k: 'lit', t: 'sel', v });
+
+function oneLayerIR(op, slots, layerName = '重复条', type = 'shape') {
+  return {
+    project: { name: 'p', width: 1920, height: 1080, fps: 30, duration: 5 },
+    markers: [], variables: [],
+    layers: [{
+      id: 'L1', name: layerName, type, visible: true,
+      props: { x: 960, y: 540, w: 100, h: 20 },
+      blocks: [{ id: 'B1', op, slots: slots.map(value => ({ value })) }],
+    }],
+    customLibrary: null,
+  };
+}
+function evalLayer(ir, t = 0) {
+  const { state } = EV.evaluateFrame(ir, t, null);
+  return state.layers['L1'];
+}
+
+t('积木:repeater 按面板 5 个槽读，参数不再整体错一位', () => {
+  // 面板里填：份数 8、间距 90、错峰 0.06、起始 0、起始高度 20
+  const ir = oneLayerIR('repeater', [
+    NUMLIT(8), NUMLIT(90), TIMELIT(0.06), TIMELIT(0), NUMLIT(20),
+  ]);
+  const ls = evalLayer(ir);
+  ok(ls.data && ls.data.kind === 'repeater', `没产出 repeater 数据：${JSON.stringify(ls.data)}`);
+  const items = ls.data.items;
+  eq(items.length, 8, `份数读错：期望 8，实际 ${items.length}`);
+  eq(items.slice(0, 4).map(x => +x.delay.toFixed(3)).join(','), '0,0.06,0.12,0.18',
+    `错峰间隔读错：${items.slice(0, 4).map(x => x.delay).join(',')}`);
+  eq(items.slice(0, 4).map(x => x.x).join(','), '0,90,180,270',
+    `水平间距读错：${items.slice(0, 4).map(x => x.x).join(',')}`);
+  eq(items[0].h, 20, `起始高度读错：${items[0].h}`);
+});
+
+t('积木:repeater 带图层槽的模板写法仍被正确识别', () => {
+  // 模板写法：第 0 槽是图层名，参数从第 1 槽开始
+  const ir = oneLayerIR('repeater', [
+    SELLIT('重复条'), NUMLIT(14), NUMLIT(92), TIMELIT(0.05), TIMELIT(1.0), NUMLIT(16),
+  ]);
+  // 定义只有 5 槽，这里手工补到 6 槽以模拟模板语义
+  ir.layers[0].blocks[0].slots.push({ value: NUMLIT(16) });
+  ir.layers[0].blocks[0].slots = [
+    { value: SELLIT('重复条') }, { value: NUMLIT(14) }, { value: NUMLIT(92) },
+    { value: TIMELIT(0.05) }, { value: TIMELIT(1.0) }, { value: NUMLIT(16) },
+  ];
+  const ls = evalLayer(ir);
+  const items = ls.data.items;
+  eq(items.length, 14, `带图层槽时份数读错：${items.length}`);
+  eq(items[1].x, 92, `带图层槽时间距读错：${items[1].x}`);
+  eq(+items[1].delay.toFixed(3), 1.05, `带图层槽时错峰读错：${items[1].delay}`);
+  eq(items[0].h, 16, `带图层槽时起始高度读错：${items[0].h}`);
+});
+
+t('积木:particles 按面板 5 个槽读', () => {
+  // 面板：粒子数 90、起始 0、时长 3、颜色 #4a8cff、速度 180
+  const ir = oneLayerIR('particles', [
+    NUMLIT(90), TIMELIT(0), TIMELIT(3), { k: 'lit', t: 'col', v: '#4a8cff' }, NUMLIT(180),
+  ], '粒子');
+  const ls = evalLayer(ir);
+  ok(ls.data && ls.data.kind === 'particles', `没产出 particles 数据：${JSON.stringify(ls.data)}`);
+  eq(ls.data.ps.length, 90, `粒子数读错：${ls.data.ps.length}`);
+  eq(ls.data.dur, 3, `时长读错：${ls.data.dur}`);
+  eq(ls.data.start, 0, `起始读错：${ls.data.start}`);
+  eq(ls.data.color, '#4a8cff', `颜色读错：${ls.data.color}`);
+  // 速度决定初速大小：180 的量级应落在 72~180 之间（0.4~1.0 倍）
+  const speeds = ls.data.ps.map(p => Math.hypot(p.vx, p.vy));
+  const maxSp = Math.max(...speeds);
+  ok(maxSp > 60 && maxSp <= 180.001, `速度读错：最大初速 ${maxSp.toFixed(1)}（期望 ≤180 且同量级）`);
+});
+
+t('积木:particles 带图层槽的模板写法仍被正确识别', () => {
+  const ir = oneLayerIR('particles', [], '粒子');
+  ir.layers[0].blocks[0].slots = [
+    { value: SELLIT('粒子') }, { value: NUMLIT(140) }, { value: TIMELIT(1.4) },
+    { value: TIMELIT(3.5) }, { value: { k: 'lit', t: 'col', v: '#7c5cff' } }, { value: NUMLIT(220) },
+  ];
+  const ls = evalLayer(ir);
+  eq(ls.data.ps.length, 140, `带图层槽时粒子数读错：${ls.data.ps.length}`);
+  eq(ls.data.dur, 3.5, `带图层槽时时长读错：${ls.data.dur}`);
+  eq(ls.data.start, 1.4, `带图层槽时起始读错：${ls.data.start}`);
+  eq(ls.data.color, '#7c5cff', `带图层槽时颜色读错：${ls.data.color}`);
+});
+
+t('积木:repeater/particles 的图层槽判别不会把数字当图层名', () => {
+  // 判别必须稳：面板填的第一个值是数字，不能被误认成图层名
+  const ir = oneLayerIR('repeater', [
+    NUMLIT(8), NUMLIT(90), TIMELIT(0.06), TIMELIT(0), NUMLIT(20),
+  ]);
+  const ls = evalLayer(ir);
+  eq(ls.data.items.length, 8, '第一个数字被当成图层槽，参数整体错位');
+});
+
+t('模板:particles 模板的行为与槽位修复前保持一致', () => {
+  // 这条守「修面板路径不能把既有模板改坏」。
+  // 模板实际存下来的槽（blk 按 def.slots 截断）：图层名/140/1.4/3.5/#7c5cff
+  const ir = TP.loadTemplate('particles');
+  const rep = ir.layers.find(l => l.name === '重复条');
+  const ps = ir.layers.find(l => l.name === '粒子');
+  ok(rep && ps, '模板缺少重复条/粒子图层');
+  const { state } = EV.evaluateFrame(ir, 1.0, null);
+  const rl = state.layers[rep.id].data;
+  const pl = state.layers[ps.id].data;
+  eq(rl.kind, 'repeater');
+  eq(rl.items.length, 14, `模板重复器份数变了：${rl.items.length}`);
+  eq(rl.items[1].x, 92, `模板重复器间距变了：${rl.items[1].x}`);
+  eq(pl.kind, 'particles');
+  eq(pl.ps.length, 140, `模板粒子数变了：${pl.ps.length}`);
+  eq(pl.dur, 3.5, `模板粒子时长变了：${pl.dur}`);
+  eq(pl.start, 1.4, `模板粒子起始变了：${pl.start}`);
+});
+
+t('模板:particles 模板的粒子真的会动、重复条真的有高度', () => {
+  // 这条是本轮最关键的回归：修复前这个模板从发布起就是坏的 ——
+  // templates.js 多传了一个图层名参数，blk() 按 def.slots 的 5 个槽硬塞，
+  // 参数整体右移一位，于是：
+  //   重复条：槽4「起始高度」拿到的是 1.0（时间值）→ h=0
+  //   粒子：  槽4「速度」拿到的是颜色字符串 "#7c5cff" → speed=0 → 原地不动
+  // 用户打开模板看到的是坏画面，且不报错。
+  const ir = TP.loadTemplate('particles');
+  const rep = ir.layers.find(l => l.name === '重复条');
+  const ps = ir.layers.find(l => l.name === '粒子');
+  ok(rep && ps, '模板缺少重复条/粒子图层');
+
+  const { state } = EV.evaluateFrame(ir, 1.0, null);
+  const rl = state.layers[rep.id].data;
+  const pl = state.layers[ps.id].data;
+
+  eq(rl.kind, 'repeater');
+  eq(rl.items.length, 14, `模板重复器份数变了：${rl.items.length}`);
+  eq(rl.items[1].x, 92, `模板重复器间距变了：${rl.items[1].x}`);
+  // 关键：起始高度必须真的是 16，不能是 0
+  eq(rl.items[0].h, 16, `重复条高度是 ${rl.items[0].h}，应为 16（参数错位时会是 0）`);
+
+  eq(pl.kind, 'particles');
+  eq(pl.ps.length, 140, `模板粒子数变了：${pl.ps.length}`);
+  eq(pl.dur, 3.5, `模板粒子时长变了：${pl.dur}`);
+  eq(pl.start, 1.4, `模板粒子起始变了：${pl.start}`);
+  // 关键：速度必须真的是 220 量级，不能是 0
+  const maxSp = Math.max(...pl.ps.map(p => Math.hypot(p.vx, p.vy)));
+  ok(maxSp > 80, `粒子最大初速只有 ${maxSp.toFixed(2)}，应约 220（参数错位时会是 0，粒子原地不动）`);
+});
+
+t('模板:所有模板的槽值类型都与 blocks.js 定义相符', () => {
+  // 通用守门：防止再有模板把「图层名」塞进 num 槽、把颜色塞进 num 槽。
+  // 判据是「值的类型」与「槽声明的类型」一致。
+  const bad = [];
+  for (const meta of TP.TEMPLATES) {
+    const ir = TP.loadTemplate(meta.key);
+    for (const l of ir.layers) {
+      for (const b of l.blocks) {
+        const def = BL.defOf(b.op);
+        if (!def) continue;
+        b.slots.forEach((s, i) => {
+          const want = def.slots[i];
+          if (!want) { bad.push(`${meta.key}/${l.name}/${b.op}[${i}] 定义里没有这个槽`); return; }
+          const v = s.value && s.value.v;
+          const numLike = want.type === 'num' || want.type === 'time';
+          if (numLike && typeof v === 'string' && isNaN(Number(v))) {
+            bad.push(`${meta.key}/${l.name}/${b.op}[${i}]「${want.label}」是 ${want.type} 槽，却存了字符串 ${JSON.stringify(v)}`);
+          }
+          if (want.type === 'col' && typeof v === 'number') {
+            bad.push(`${meta.key}/${l.name}/${b.op}[${i}]「${want.label}」是 col 槽，却存了数字 ${v}`);
+          }
+          if (want.type === 'sel' && typeof v === 'number') {
+            bad.push(`${meta.key}/${l.name}/${b.op}[${i}]「${want.label}」是 sel 槽，却存了数字 ${v}`);
+          }
+        });
+      }
+    }
+  }
+  eq(bad.length, 0, `模板槽位值类型不符：\n  ${bad.join('\n  ')}`);
+});
+
+t('模板:particles 模板的每个块槽数都等于 blocks.js 的定义', () => {
+  // blk() 按 def.slots.length 截断：多传的参数会被静默丢弃，
+  // 少传的会落到 defaultForType。两种都不该发生 —— 槽数必须正好相等。
+  const bad = [];
+  for (const meta of TP.TEMPLATES) {
+    const ir = TP.loadTemplate(meta.key);
+    for (const l of ir.layers) {
+      for (const b of l.blocks) {
+        const def = BL.defOf(b.op);
+        if (!def) continue;
+        const want = (def.slots || []).length;
+        if (b.slots.length !== want) {
+          bad.push(`${meta.key}/${l.name}/${b.op}: 存了 ${b.slots.length} 槽，定义是 ${want} 槽`);
+        }
+      }
+    }
+  }
+  eq(bad.length, 0, `模板槽数与定义不符：\n  ${bad.join('\n  ')}`);
+});
+
 /* ============================================================
    汇总
    ============================================================ */
+await Promise.all(pendingTests);   // 等所有异步用例真正跑完再统计
 console.log('');
 if (fail === 0) console.log(`%c✓ V3/V4（市场/素材/AI/协作）自测全部通过 ${pass}/${pass + fail}`, 'color:#38c98b;font-weight:700');
 else {

@@ -79,10 +79,16 @@ export function decodeWav(arrayBuffer) {
     for (let c = 0; c < fmt.channels; c++) {
       const off = dataOffset + (i * fmt.channels + c) * bytesPerSample;
       let v = 0;
-      if (fmt.bits === 16) v = dv.getInt16(off, true) / 32767;
+      // IEEE float 必须排在位深判断之前：format=3 且 bits=32 的浮点 WAV
+      // 一旦被下面的 bits===32 抢走，就会当成 int32 解出噪声。
+      if (fmt.format === 3 && fmt.bits === 32) v = dv.getFloat32(off, true);
+      else if (fmt.bits === 16) v = dv.getInt16(off, true) / 32767;
       else if (fmt.bits === 8) v = (dv.getUint8(off) - 128) / 128;
-      else if (fmt.bits === 32) v = dv.getInt32(off, true) / 0x80000000;
-      else if (fmt.format === 3) v = dv.getFloat32(off, true);
+      else if (fmt.bits === 24) {
+        // 24bit 是小端 3 字节有符号，DataView 没有对应 getter，手动拼字节并做符号扩展
+        const x = dv.getUint8(off) | (dv.getUint8(off + 1) << 8) | (dv.getUint8(off + 2) << 16);
+        v = (x & 0x800000 ? x - 0x1000000 : x) / 0x800000;
+      } else if (fmt.bits === 32) v = dv.getInt32(off, true) / 0x80000000;
       acc += v;
     }
     left[i] = acc / fmt.channels;
@@ -445,7 +451,7 @@ function biquad(input, coef) {
 
 /* 整体响度 LUFS */
 export function measureLoudness(samples, sampleRate) {
-  if (samples.length < sampleRate * 0.05) return { lufs: -70, lra: 0, peak: 0 };
+  if (samples.length < sampleRate * 0.05) return { lufs: -70, lra: 0, peak: 0, truePeakDb: -Infinity };
   const K = designKWeighting(sampleRate);
   const stage1 = biquad(samples, K.stage1);
   const stage2 = biquad(stage1, K.stage2);
@@ -511,9 +517,13 @@ export const LOUDNESS_PRESETS = {
    ============================================================ */
 export function mixTracks(tracks, duration, opts = {}) {
   const sr = opts.sampleRate || 48000;
-  const out = new Float32Array(Math.ceil(duration * sr));
+  // duration 是混音长度的唯一来源。漏传会让 Math.ceil(undefined * sr) 得到 NaN，
+  // 而 new Float32Array(NaN) 不抛错、只是一个长度 0 的数组 —— 于是「看起来成功、
+  // 实际全空」这种最难查的失败就出现了。这里显式兜底成按轨道推算。
+  const total = Number.isFinite(duration) && duration > 0 ? duration : mixDuration(tracks);
+  const out = new Float32Array(Math.ceil(total * sr));
   const ducking = opts.ducking !== false;
-  const voiceEnergy = ducking ? buildVoiceEnergy(tracks, duration, sr) : null;
+  const voiceEnergy = ducking ? buildVoiceEnergy(tracks, total, sr) : null;
 
   for (const tr of tracks) {
     if (tr.muted || !tr.samples.length) continue;
@@ -539,6 +549,17 @@ export function mixTracks(tracks, duration, opts = {}) {
     if (Math.abs(v) > ceiling) out[i] = Math.sign(v) * ceiling;
   }
   return out;
+}
+
+/** 未显式给出时长时，按各轨「起点 + 长度」的最大值推算 */
+export function mixDuration(tracks) {
+  let end = 0;
+  for (const tr of tracks) {
+    if (!tr || !tr.samples) continue;
+    const sr = tr.sampleRate || 48000;
+    end = Math.max(end, (tr.start || 0) + tr.samples.length / sr);
+  }
+  return end;
 }
 
 /* 人声能量包络（用于闪避判断），50Hz 采样足够 */

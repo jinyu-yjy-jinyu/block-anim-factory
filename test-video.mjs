@@ -10,11 +10,22 @@ const VE = await import(U('src/video-export.js'));
 const EV = await import(U('src/evaluator.js'));
 const HC = await import(U('src/headless-canvas.mjs'));
 const TP = await import(U('src/templates.js'));
+const IR = await import(U('src/ir.js'));
+const BL = await import(U('src/blocks.js'));
+const AI = await import(U('src/ai.js'));
 
 let pass = 0, fail = 0; const failures = [];
+// 异步用例必须被等待：原实现把 f() 返回的 Promise 直接当成「非 false」计为通过，
+// 于是 async 用例里的断言从未执行也会记为通过。
+const pendingTests = [];
 const t = (n, f) => {
-  try { const r = f(); if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; }
-  catch (e) { fail++; failures.push(`${n} → ${e.message}`); }
+  const good = (r) => { if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; };
+  const bad = (e) => { fail++; failures.push(`${n} → ${e.message}`); };
+  try {
+    const r = f();
+    if (r && typeof r.then === 'function') { pendingTests.push(r.then(good, bad)); return; }
+    good(r);
+  } catch (e) { bad(e); }
 };
 const eq = (a, b, m) => { if (String(a) !== String(b)) throw new Error(`${m || ''} 期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`); };
 const near = (a, b, e, m) => { if (!(Math.abs(a - b) <= (e == null ? 1e-6 : e))) throw new Error(`${m || ''} 期望 ≈${b}，实际 ${a}`); };
@@ -171,6 +182,43 @@ t('音源:prepareTrack 预计算', () => {
   ok(tr.loudness, '缺响度');
 });
 
+/* ---------- 回归：真实模式频谱不能是平的 ---------- */
+/* 原来 spectrum() 读 a.spectrogram（恒为 undefined）直接返回全零，
+   而旧断言只验「长度对不对、值在不在 0..1」，全零照样通过。
+   这里改成验「真的随频率/时间有变化」。 */
+t('音源:真实模式频谱不是全零', () => {
+  const s = AS.AudioSource.fromTracks([speechTrack(4)]);
+  const spec = s.spectrum(1.0, 32);          // 1.0s 落在有声段内
+  eq(spec.length, 32);
+  ok(spec.every(v => isFinite(v) && v >= 0 && v <= 1.001), '频谱越界');
+  ok(spec.some(v => v > 1e-6), '频谱全零 —— 十有八九又去读了 analysis.spectrogram');
+  const max = Math.max(...spec);
+  ok(max > 0.01, `频谱峰值只有 ${max}，基本等于没信号`);
+});
+t('音源:真实模式频谱随频率有形状', () => {
+  // 220+500Hz 的信号，能量应集中在低频段，而不是一条平线
+  const s = AS.AudioSource.fromTracks([speechTrack(4)]);
+  const spec = s.spectrum(1.0, 32);
+  const low = spec.slice(0, 8).reduce((a, c) => a + c, 0) / 8;
+  const high = spec.slice(24).reduce((a, c) => a + c, 0) / 8;
+  ok(low > high, `低频段 ${low.toFixed(4)} 未高于高频段 ${high.toFixed(4)}，频谱可能是平的`);
+});
+t('音源:未预计算也能取到频谱（现算兜底）', () => {
+  const tr = speechTrack(3);
+  delete tr.spectrogram;                     // 模拟没走 prepareTrack
+  const s = AS.AudioSource.fromTracks([tr]);
+  const spec = s.spectrum(1.0, 16);
+  ok(spec.some(v => v > 1e-6), '没有预计算就返回全零');
+  ok(tr.spectrogram, '兜底路径没有把结果缓存到轨道上');
+});
+t('音源:频谱仍是纯函数（多帧不相干）', () => {
+  const s = AS.AudioSource.fromTracks([speechTrack(4)]);
+  const a1 = s.spectrum(1.0, 16);
+  s.spectrum(3.0, 16); s.spectrum(0.1, 16);
+  const a2 = s.spectrum(1.0, 16);
+  eq(JSON.stringify(a1), JSON.stringify(a2), '重复取值结果变了');
+});
+
 /* ============================================================
    视频导出
    ============================================================ */
@@ -241,6 +289,27 @@ t('导出:不支持 MP4 时抛可识别错误', async () => {
   eq(err.code, 'NO_MP4_SUPPORT');
   ok(err.message.includes('WebM'), '错误信息应提示替代方案');
 });
+/* 能力探测与编码分支必须读同一件事。
+   原来 canMp4 把「本机装了 ffmpeg」（ffmpegLocal）也算进来，但那条路
+   （注释里的 localServer）全库从未实现 —— 装了 ffmpeg 的机器界面显示「可用」，
+   点导出却抛「没有可用的 MP4 编码路径」。 */
+t('导出:canMp4 只认编码分支真正支持的两条路', async () => {
+  const caps = await VE.detectCapabilities();
+  eq(caps.canMp4, !!(caps.webcodecs || caps.ffmpegWasm),
+    `canMp4 必须等于 webcodecs || ffmpegWasm（实测 caps=${JSON.stringify(caps)}）`);
+});
+t('导出:本机装了 ffmpeg 也不谎报 MP4 可用（无 WebCodecs 时）', async () => {
+  const caps = await VE.detectCapabilities();
+  if (caps.webcodecs || caps.ffmpegWasm) return;   // 真有可用编码路径则跳过
+  eq(caps.canMp4, false, '既无 WebCodecs 也无 ffmpeg.wasm 时，canMp4 必须是 false');
+  let err = null;
+  const ir = TP.loadTemplate('popTitle');
+  try {
+    await VE.exportVideo(ir, null, { format: 'mp4', fps: 12, from: 0, to: 0.2 });
+  } catch (e) { err = e; }
+  ok(err, '探测说不可用，导出就必须报错（两者不能矛盾）');
+  eq(err.code, 'NO_MP4_SUPPORT');
+});
 t('导出:GIF 帧编码端到端（用记录型画布）', async () => {
   // Node 下没有真实 canvas，这里只验证参数校验与早期失败路径
   const ir = TP.loadTemplate('popTitle');
@@ -256,9 +325,421 @@ t('导出:帧率与区间非法时 total 为 0', () => {
   eq(src.total, 0);
 });
 
+/* WebM 是唯一「按真实墙钟采集」的导出路径：MediaRecorder 给
+   captureStream(0) 的帧打的是 requestFrame() 落地的墙钟时间戳，
+   所以导出帧率 = 喂帧循环的真实节拍。
+   原实现是「画完 → requestFrame → 睡 frameDur」，误差只加不减：
+
+     t 间隔 = 绘制耗时 + frameDur + 定时器粒度
+
+   实测（本机，setTimeout 粒度约 13~15ms）：
+     目标 60fps、每帧绘制 16ms → 实际 2.7 倍间隔（约 22fps）
+     目标 30fps、每帧绘制 30ms → 实际 2.3 倍间隔（约 13fps）
+   下面对照的是「绝对时间表」：deadline 先算好，绘制耗时要么被吸收、
+   要么让这一帧的等待归零 —— 但绝不顺延到下一帧。 */
+function makeWebmHarness({ drawMs = 0, total = 20, fps = 60 } = {}) {
+  const captures = [];
+  const ctx = HC.makeCtx([]);
+  const track = { requestFrame: () => captures.push(performance.now()) };
+  const stream = { getVideoTracks: () => [track] };
+  const canvas = { width: 0, height: 0, getContext: () => ctx, captureStream: () => stream };
+  const hasDoc = Object.prototype.hasOwnProperty.call(globalThis, 'document');
+  const hasRec = Object.prototype.hasOwnProperty.call(globalThis, 'MediaRecorder');
+  const savedDoc = globalThis.document, savedRec = globalThis.MediaRecorder;
+  globalThis.document = { createElement: () => canvas };
+  let stoppedAt = null;
+  class FakeRec {
+    static isTypeSupported() { return true; }
+    start() {}
+    stop() { stoppedAt = performance.now(); if (this.onstop) this.onstop(); }
+  }
+  globalThis.MediaRecorder = FakeRec;
+  const restore = () => {
+    if (hasDoc) globalThis.document = savedDoc; else delete globalThis.document;
+    if (hasRec) globalThis.MediaRecorder = savedRec; else delete globalThis.MediaRecorder;
+  };
+  const src = {
+    w: 320, h: 180, fps, total,
+    draw: () => {
+      if (drawMs > 0) { const end = performance.now() + drawMs; while (performance.now() < end); }
+    },
+  };
+  return { src, captures, restore, stoppedAt: () => stoppedAt };
+}
+const webmSpan = (h) => h.captures[h.captures.length - 1] - h.captures[0];
+
+t('导出:WebM 喂帧按目标节拍（绘制耗时不得累加进帧间隔）', async () => {
+  const h = makeWebmHarness({ drawMs: 16, total: 20, fps: 60 });
+  try { await VE.exportWebM(h.src, {}, () => {}, () => false); } finally { h.restore(); }
+  eq(h.captures.length, 20, '喂出的帧数应与 total 一致');
+  const theory = (20 - 1) * 1000 / 60;
+  const span = webmSpan(h);
+  ok(span <= theory * 1.35,
+    `20 帧 60fps 应约 ${theory.toFixed(0)}ms，实测 ${span.toFixed(0)}ms（${(span / theory).toFixed(2)} 倍；累加式约 2.7 倍）`);
+  ok(span >= theory * 0.7, `喂帧过快，实测 ${span.toFixed(0)}ms`);
+});
+t('导出:WebM 目标 30fps 且单帧绘制比帧长还慢时仍不漂移', async () => {
+  // 30fps 的单帧预算是 33.3ms，这里故意让绘制花 30ms：
+  // 留给等待的余量只剩 3ms，远超定时器粒度，正是累加式最容易崩的工况。
+  const h = makeWebmHarness({ drawMs: 30, total: 16, fps: 30 });
+  try { await VE.exportWebM(h.src, {}, () => {}, () => false); } finally { h.restore(); }
+  eq(h.captures.length, 16, '喂出的帧数应与 total 一致');
+  const theory = (16 - 1) * 1000 / 30;
+  const span = webmSpan(h);
+  ok(span <= theory * 1.35,
+    `16 帧 30fps 应约 ${theory.toFixed(0)}ms，实测 ${span.toFixed(0)}ms（${(span / theory).toFixed(2)} 倍；累加式约 2.3 倍）`);
+  ok(span >= theory * 0.7, `喂帧过快，实测 ${span.toFixed(0)}ms`);
+});
+t('导出:WebM 停止前给 recorder 留足最后几帧的采样时间', async () => {
+  // 新循环不在 requestFrame 之后睡，所以沉降时间全靠收尾那一处。
+  // 这里钉住它：最后一帧之后到 stop() 之间必须有 3×frameDur 的余量，
+  // 否则最后一帧还没被采到就停了（表现为成片丢尾帧）。
+  const h = makeWebmHarness({ drawMs: 0, total: 8, fps: 60 });
+  try { await VE.exportWebM(h.src, {}, () => {}, () => false); } finally { h.restore(); }
+  const last = h.captures[h.captures.length - 1];
+  const settle = h.stoppedAt() - last;
+  ok(settle >= 1000 / 60 * 2.5,
+    `最后一帧到 stop() 只有 ${settle.toFixed(0)}ms，最后一帧可能没被采到`);
+});
+
+/* ---------- 求值器：变量与循环护栏 ---------- */
+const evalIR = (blocks) => ({
+  project: { name: 'p', width: 1920, height: 1080, fps: 30, duration: 10 },
+  markers: [],
+  variables: [],
+  layers: [{ id: 'L1', name: 'L1', type: 'text', visible: true, props: { text: 'x' }, blocks }],
+  customLibrary: null,
+});
+const loopOf = (n, inner) => ({
+  id: 'lp', k: 'C', op: 'loop',
+  slots: [{ type: 'num', label: '次数', value: IR_NUM(n) }, { type: 'blocks', label: '每次', value: inner }],
+});
+const IR_NUM = (v) => ({ k: 'lit', t: 'num', v });
+const waitBlk = () => ({ id: 'w', k: 'C', op: 'wait', slots: [{ type: 'time', value: { k: 'lit', t: 'time', v: 0.001 } }] });
+
+t('求值:变量存对象时取回原值（不被当字面量再展开）', () => {
+  // 回归：`case 'var'` 里判断是 `'v' in v`，于是用户存进去的任何带 v 字段的
+  // 对象都被当成字面量节点再求值一次，用户拿到的不是他存的值。
+  const { ctx } = EV.evaluateFrame(evalIR([]), 0, null, {});
+  ctx.setVar('myVar', { v: 42 });
+  eq(EV.evalExpr({ k: 'var', name: 'myVar' }, ctx).v, 42, '带 v 字段的对象被当成了字面量');
+  ctx.setVar('litVar', { k: 'lit', t: 'num', v: 7 });
+  eq(EV.evalExpr({ k: 'var', name: 'litVar' }, ctx), 7, '真字面量应展开成数值');
+  ctx.setVar('plain', { name: 'a', id: 1 });
+  eq(EV.evalExpr({ k: 'var', name: 'plain' }, ctx).name, 'a', '普通对象应原样返回');
+  eq(EV.evalExpr({ k: 'var', name: '未定义' }, ctx), 0);
+});
+t('求值:嵌套 loop 受整帧步数预算约束，不卡死', () => {
+  // 回归：loop 的 500 是「每层」上限，嵌套是乘积（500ⁿ）。3 层 = 1.25 亿次
+  // 语句执行，实测 27.6 秒卡死界面；4 层根本算不完。
+  let blocks = [waitBlk()];
+  for (let i = 0; i < 4; i++) blocks = [loopOf(500, blocks)];
+  let count = 0;
+  const t0 = Date.now();
+  const { ctx } = EV.evaluateFrame(evalIR(blocks), 0, null, { onBlock: () => count++ });
+  const ms = Date.now() - t0;
+  ok(ctx.budgetExceeded, '4 层嵌套未被预算拦下');
+  ok(ms < 3000, `${ms}ms 仍然过慢（应在百毫秒级被截断）`);
+  ok(count <= ctx.stepBudget + 8, `执行步数 ${count} 超出预算 ${ctx.stepBudget}`);
+});
+t('求值:预算内正常工程不被截断', () => {
+  const blocks = [loopOf(20, [waitBlk()])];
+  const { ctx } = EV.evaluateFrame(evalIR(blocks), 0, null, {});
+  eq(ctx.budgetExceeded, false, '正常工程被误截断');
+  eq(ctx.steps, 21, '步数应为 1 层 + 20 次');
+});
+t('求值:步数预算可配置', () => {
+  const blocks = [loopOf(500, [waitBlk()])];
+  const { ctx } = EV.evaluateFrame(evalIR(blocks), 0, null, { maxSteps: 10 });
+  ok(ctx.steps <= 11, `实际 ${ctx.steps}`);
+  ok(ctx.budgetExceeded);
+});
+
+/* ---------- 变量链路（#8）----------
+   原来四层全断：EvalContext 从不载入 ir.variables、$ 前缀与内置键不一致、
+   VAR 值一律被包成字符串字面量、toText 的 JSON 写法与读取侧不对称。
+   表现为「工程里声明了变量，表达式里永远取到 0，文本里 $score 原样显示」。 */
+const varIR = (variables, blocks = [], props = {}) => ({
+  project: { name: 'p', width: 1920, height: 1080, fps: 30, duration: 10 },
+  markers: [],
+  variables,
+  layers: [{ id: 'L1', name: 'L1', type: 'text', visible: true, props: Object.assign({ text: 'x' }, props), blocks }],
+  customLibrary: null,
+});
+const setVarBlk = (name, val) => ({
+  id: 'sv', k: 'C', op: 'setVar',
+  slots: [
+    { type: 'str', label: '变量名', value: IR_STR(name) },
+    { type: 'num', label: '值', value: val },
+  ],
+});
+const IR_STR = (v) => ({ k: 'lit', t: 'str', v });
+
+t('变量:工程声明的变量会被载入求值上下文', () => {
+  // 回归：EvalContext 构造里只 set 了 $time/$frame/$progress，
+  // 从不遍历 ir.variables，所以声明的变量在表达式里恒为 0。
+  const ir = varIR([{ id: 'V1', name: 'score', type: 'num', value: IR_NUM(42) }]);
+  const { ctx } = EV.evaluateFrame(ir, 0, null, {});
+  // ctx 里存的是字面量节点（由 evalExpr 展开），不是裸值 —— 这是有意的：
+  // 变量可以存表达式/颜色/字符串，求值器统一按 Expr 处理。
+  eq(ctx.getVar('score').v, 42, '声明的变量没进上下文');
+  eq(EV.evalExpr({ k: 'var', name: 'score' }, ctx), 42, '表达式里取不到变量值');
+});
+
+t('变量:文本里的 $变量 渲染出真值', () => {
+  // 回归：PROP text = "$score" 原来渲染出字面量 "$score"（连插值都没发生）。
+  const ir = varIR([{ id: 'V1', name: 'score', type: 'num', value: IR_NUM(42) }], [], { text: '得分 $score' });
+  const { state } = EV.evaluateFrame(ir, 0, null, {});
+  eq(state.layers.L1.p.text, '得分 42', '文本里的变量没被插值');
+});
+
+t('变量:内置 $time/$frame/$progress 带不带 $ 都能取', () => {
+  // 回归：内置键是 '$time'，而 parseExpr 产出的 name 是裸名 'time'，
+  // 两条约定对不上 → 表达式里写 $time 取到 0。
+  const ir = varIR([]);
+  const { ctx } = EV.evaluateFrame(ir, 2, null, {});
+  eq(EV.evalExpr({ k: 'var', name: 'time' }, ctx), 2);
+  eq(EV.evalExpr({ k: 'var', name: '$time' }, ctx), 2, '$time 与 time 应命中同一个值');
+  eq(EV.evalExpr({ k: 'var', name: 'frame' }, ctx), 60);
+  eq(EV.evalExpr({ k: 'var', name: '$frame' }, ctx), 60);
+  ok(Math.abs(EV.evalExpr({ k: 'var', name: 'progress' }, ctx) - 0.2) < 1e-9);
+});
+
+t('变量:写变量 op 生效，后续文本读到新值', () => {
+  // 回归：全库没有任何「写变量」的 op，evaluator 的 setVar 零调用，
+  // 变量永远只能是初值。这里钉住新增的 setVar 真的写进了本帧上下文。
+  const ir = varIR(
+    [{ id: 'V1', name: 'score', type: 'num', value: IR_NUM(0) }],
+    [setVarBlk('score', { k: 'blk', op: 'add', a: IR_NUM(40), b: IR_NUM(2) })],
+    { text: '得分 $score' },
+  );
+  const seen = [];
+  const { state, ctx } = EV.evaluateFrame(ir, 0, null, { onVar: (k, v) => seen.push([k, v]) });
+  eq(ctx.getVar('score'), 42, 'setVar 没写进上下文');
+  eq(state.layers.L1.p.text, '得分 42', '积木写入后文本没读到新值');
+  eq(seen.length, 1, 'onVar 应恰好回调一次');
+  eq(seen[0][0], '$score', 'onVar 的键应归一成 $name');
+  eq(seen[0][1], 42);
+});
+
+t('变量:文本插值只替换已声明的变量，未声明的原样保留', () => {
+  // 用户正文里写「价格 $100」「$abc」不该被静默吃掉；
+  // $data.键 是数据面板的绑定语法，要整段留给它。
+  const ir = varIR([], [], { text: '价格 $100 与 $abc 与 $data.c0' });
+  const { state } = EV.evaluateFrame(ir, 0, null, {});
+  eq(state.layers.L1.p.text, '价格 $100 与 $abc 与 $data.c0');
+});
+
+t('变量:文本插值不误伤非文本属性', () => {
+  // 只对 text 插值：fill 之类保持字面量，避免把颜色/路径里的 $ 误当变量。
+  const ir = varIR([{ id: 'V1', name: 'c', type: 'col', value: { k: 'lit', t: 'col', v: '#ff0000' } }], [], { text: 'x' });
+  ir.layers[0].props.fill = '$c';
+  const { state } = EV.evaluateFrame(ir, 0, null, {});
+  eq(state.layers.L1.p.fill, '$c', '非文本属性不该被插值');
+});
+
+t('变量:VAR 行保留类型，不再一律包成字符串', () => {
+  // 回归：fromText 的 VAR 解析是 `STR(m[2])`，数字/布尔/颜色全变字符串，
+  // 再存回去就成了 `"42"`，类型信息永久丢失。
+  IR.registerOpMeta(BL.BLOCK_DEFS.map(d => BL.metaFor(d.op)).filter(Boolean));
+  const txt = '# 工程: t\nVAR score 42\nVAR 标题 "甲"\nVAR 开关 true\nLAYER L1 [text]\n  PROP text = "x"';
+  const { ir } = IR.fromText(txt, BL.BLOCK_DEFS);
+  const byName = Object.fromEntries(ir.variables.map(v => [v.name, v]));
+  eq(byName.score.value.t, 'num', '数字被当成了字符串');
+  eq(byName.score.value.v, 42);
+  eq(byName.score.type, 'num', 'type 应跟着值的类型走');
+  eq(byName.标题.value.t, 'str');
+  eq(byName.标题.value.v, '甲', '字符串不该带引号');
+  eq(byName.开关.value.t, 'bool');
+  eq(byName.开关.value.v, true);
+});
+
+t('变量:toText/fromText 往返四轮，第 2 轮与第 4 轮逐字相同', () => {
+  // 回归（最要紧的一条）：toText 写 JSON、fromText 一律包 STR，
+  // 于是每存读一轮多套一层转义（42 → "42" → "\"42\"" → …），
+  // 用户工程文件会被逐轮写坏。第 2 轮之后必须完全稳定。
+  // 注：第 1 轮可能与第 2 轮不同 —— 手写/程序构造的 IR 可能缺省 props，
+  // 读回来会被补全成完整图层。判据是「第 2 轮起稳定」，这才是工程文件的形态。
+  IR.registerOpMeta(BL.BLOCK_DEFS.map(d => BL.metaFor(d.op)).filter(Boolean));
+  const ir = varIR([
+    { id: 'V1', name: 'score', type: 'num', value: IR_NUM(42) },
+    { id: 'V2', name: '标题', type: 'str', value: IR_STR('甲') },
+    { id: 'V3', name: '开关', type: 'bool', value: { k: 'lit', t: 'bool', v: true } },
+  ]);
+  const t1 = IR.toText(ir);
+  const r2 = IR.fromText(t1, BL.BLOCK_DEFS).ir;
+  const t2 = IR.toText(r2);
+  const r3 = IR.fromText(t2, BL.BLOCK_DEFS).ir;
+  const t3 = IR.toText(r3);
+  const r4 = IR.fromText(t3, BL.BLOCK_DEFS).ir;
+  const t4 = IR.toText(r4);
+  eq(t2, t4, '第 2 轮与第 4 轮不一致 → 往返仍在累积转义');
+  eq(t2, t3, '第 2 轮与第 3 轮不一致 → 往返还没稳定');
+  const vals = r4.variables.map(v => `${v.name}=${v.value.t}:${JSON.stringify(v.value.v)}`).join(' ');
+  eq(vals, 'score=num:42 标题=str:"甲" 开关=bool:true', '往返后变量值/类型被改坏');
+});
+
+t('变量:往返后带 setVar 的积木仍指向正确的槽', () => {
+  // 新 op 必须能被序列化/反序列化，且槽位顺序不变（AI 与模板共用 op ID）。
+  IR.registerOpMeta(BL.BLOCK_DEFS.map(d => BL.metaFor(d.op)).filter(Boolean));
+  const ir = varIR(
+    [{ id: 'V1', name: 'score', type: 'num', value: IR_NUM(0) }],
+    [setVarBlk('score', { k: 'blk', op: 'mul', a: { k: 'var', name: 'score' }, b: IR_NUM(2) })],
+  );
+  const back = IR.fromText(IR.toText(ir), BL.BLOCK_DEFS).ir;
+  const b = back.layers[0].blocks[0];
+  eq(b.op, 'setVar');
+  eq(b.slots.length, 2);
+  eq(b.slots[0].value.t, 'str');
+  eq(b.slots[0].value.v, 'score', '变量名槽被写坏');
+  eq(b.slots[1].value.k, 'blk');
+  eq(b.slots[1].value.op, 'mul');
+  eq(b.slots[1].value.a.k, 'var', '变量引用没被保留');
+  eq(b.slots[1].value.a.name, 'score');
+});
+
+t('变量:新增的写变量 op 与积木库定义自洽', () => {
+  // 新增 op 的守门：必须进 BLOCK_DEFS、分类在积木库里、且 SLOT_ORDER 有映射
+  //（SLOT_ORDER 少一条 → AI 编译时整块被跳过，界面上看不出问题）。
+  const def = BL.defOf('setVar');
+  ok(def, 'blocks.js 里没有 setVar');
+  eq(def.isLeaf, false);
+  ok(BL.PALETTE_GROUPS.includes(def.cat), '分类不在积木库分组里 → 用户找不到它');
+  eq(def.slots.length, 2, '槽位数与 evaluator 读的 E(0)/E(1) 必须一致');
+  const meta = BL.metaFor('setVar');
+  eq(meta.slots.length, 2);
+  const compiled = AI.actionsToBlocks([{ op: 'setVar', slots: { name: IR_STR('score'), value: IR_NUM(5) } }]);
+  eq(compiled.skipped.length, 0, `setVar 缺 SLOT_ORDER 映射：${JSON.stringify(compiled.skipped)}`);
+  eq(compiled.blocks[0].slots[0].value.v, 'score');
+  eq(compiled.blocks[0].slots[1].value.v, 5);
+});
+
+/* ============================================================
+   内存：GIF / PNG 序列帧导出不得随帧数线性膨胀（#26 / #27）
+   ============================================================ */
+
+/** 生成一帧可复现的 RGBA */
+function memFrame(w, h, f) {
+  const d = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    const x = i % w, y = (i / w) | 0;
+    d[i * 4] = (x * 3 + f * 7) & 0xff;
+    d[i * 4 + 1] = (y * 5 + f * 3) & 0xff;
+    d[i * 4 + 2] = ((x + y) * 2 + f * 11) & 0xff;
+    d[i * 4 + 3] = 255;
+  }
+  return d;
+}
+
+t('导出:GIF 流式编码器与批量编码器逐字节一致', async () => {
+  // 流式入口是为了把「所有帧 RGBA 全攒在内存」换成「两遍渲染、只留上一帧」。
+  // 换了实现不能换输出：同一批帧，两条路必须产出同一个 GIF。
+  const GIF = await import(U('src/gif.js'));
+  const W = 48, H = 32, N = 6;
+  const frames = [];
+  for (let f = 0; f < N; f++) {
+    const idx = (f % 4 === 3 && f > 0) ? f - 1 : f;   // 掺一帧重复帧，覆盖差分分支
+    frames.push({ rgba: memFrame(W, H, idx), delay: 4 + (f % 3) });
+  }
+  const oldBlob = GIF.encodeGIF(frames, W, H, { loop: 0, dither: true });
+  const oldBuf = Buffer.from(await oldBlob.arrayBuffer());
+
+  const scratch = new Uint8ClampedArray(W * H * 4);
+  let drawn = 0;
+  const newBlob = await GIF.encodeGIFFromSource({
+    total: N,
+    draw(i) { const idx = (i % 4 === 3 && i > 0) ? i - 1 : i; scratch.set(memFrame(W, H, idx)); drawn++; },
+    getRGBA: () => scratch,
+    delayFor: (i) => 4 + (i % 3),
+  }, W, H, { loop: 0, dither: true });
+  const newBuf = Buffer.from(await newBlob.arrayBuffer());
+
+  eq(newBuf.length, oldBuf.length, 'GIF 长度变了');
+  ok(oldBuf.equals(newBuf), 'GIF 字节内容变了（流式编码器与批量编码器必须等价）');
+  eq(drawn, N * 2, `流式编码应渲染两遍（采样+编码），实际 draw 了 ${drawn} 次`);
+});
+
+t('导出:GIF 流式编码只保留上一帧索引，不攒全部 RGBA', async () => {
+  // 判据不是「内存数字」（Node 里测不稳），而是**调用方不需要保留帧**：
+  // 流式入口只要求 draw(i) 能按序号重画，从不接收 frames 数组。
+  // 这条守住「导出通道不再把每帧 RGBA 攒起来」这个契约。
+  const GIF = await import(U('src/gif.js'));
+  const W = 32, H = 24, N = 8;
+  const scratch = new Uint8ClampedArray(W * H * 4);
+  let maxAlive = 0;
+  const blob = await GIF.encodeGIFFromSource({
+    total: N,
+    draw(i) {
+      scratch.set(memFrame(W, H, i));
+      maxAlive = Math.max(maxAlive, 1);   // 任一时刻只持有一帧工作缓冲
+    },
+    getRGBA: () => scratch,
+    delayFor: () => 5,
+  }, W, H, { loop: 0 });
+  ok(blob.size > 0, '没有产出 GIF');
+  eq(maxAlive, 1, '编码过程同时持有超过一帧像素');
+});
+
+t('导出:PNG 序列帧 ZIP 支持延迟取数（压缩完即丢原始数据）', async () => {
+  // #27 的核心：createZip 若一次性拿到所有帧的 Uint8Array，
+  // 1080p 120 帧要 ~200MB 常驻。改成 data 传函数后，逐条取、压完即弃。
+  const ZIP = await import(U('src/zip.js'));
+  const payload = (i) => {
+    const d = new Uint8Array(4096);
+    for (let j = 0; j < d.length; j++) d[j] = (j * 31 + i * 7) & 0xff;
+    return d;
+  };
+  let fetched = 0;
+  const entries = [];
+  for (let i = 0; i < 4; i++) {
+    entries.push({ name: `frames/f${i}.png`, data: () => { fetched++; return Promise.resolve(payload(i)); } });
+  }
+  const blob = await ZIP.createZip(entries);
+  const buf = Buffer.from(await blob.arrayBuffer());
+  ok(buf.length > 0, 'ZIP 为空');
+  eq(fetched, 4, '每个条目的取数函数应被调用且只调用一次');
+  eq(buf.readUInt32LE(0), 0x04034b50, 'ZIP 本地文件头签名不对');
+  eq(buf.readUInt32LE(buf.length - 22), 0x06054b50, 'ZIP 中央目录结束签名不对');
+});
+
+t('导出:deflate 不经过 Blob 中转（否则每帧多复制一整份）', async () => {
+  // 原实现 `new Blob([u8]).stream()` 会把 u8 整份复制进 Blob 存储，
+  // 序列帧导出时每帧一次，峰值随帧数线性涨（实测 4.54x → 2.81x 输入）。
+  // 输出内容两种写法完全一样，所以只能从**实现方式**上守：
+  // 静态检查 zip.js 的 deflateRaw 里不得出现 `new Blob([...]).stream()`。
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('./src/zip.js', import.meta.url), 'utf8');
+  const fn = src.match(/async function deflateRaw\(u8\)\s*\{([\s\S]*?)\n\}/);
+  ok(fn, '没找到 deflateRaw 函数');
+  // 剥掉注释再匹配 —— 注释里正好写着「不要写成 new Blob([u8]).stream()」
+  const code = fn[1]
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  ok(!/new Blob\(\s*\[\s*u8\s*\]\s*\)\s*\.stream\(\)/.test(code),
+    'deflateRaw 又用回了 new Blob([u8]).stream() —— 每帧会多复制一整份数据');
+  ok(/\.writable\.getWriter\(\)/.test(code),
+    'deflateRaw 没有直接把数据写进 CompressionStream.writable（应零额外拷贝）');
+
+  // 同时验证功能正确：解压回来必须与输入逐字节相同
+  const ZIP = await import(U('src/zip.js'));
+  const { inflateRawSync } = await import('node:zlib');
+  const raw = new Uint8Array(8192);
+  for (let i = 0; i < raw.length; i++) raw[i] = (i * 17 + 3) & 0xff;
+  const blob = await ZIP.createZip([{ name: 'x.bin', data: raw }]);
+  const buf = Buffer.from(await blob.arrayBuffer());
+  const method = buf.readUInt16LE(8);
+  const compSize = buf.readUInt32LE(18);
+  const nameLen = buf.readUInt16LE(26);
+  const body = buf.slice(30 + nameLen, 30 + nameLen + compSize);
+  const out = method === 8 ? inflateRawSync(body) : body;
+  eq(out.length, raw.length, '解压后长度不符');
+  ok(Buffer.from(out).equals(Buffer.from(raw)), '解压后内容与原始数据不一致');
+});
+
 /* ============================================================
    汇总
    ============================================================ */
+await Promise.all(pendingTests);   // 等所有异步用例真正跑完再统计
 console.log('');
 if (fail === 0) console.log(`%c✓ 音频源/视频导出自测全部通过 ${pass}/${pass + fail}`, 'color:#38c98b;font-weight:700');
 else {

@@ -78,6 +78,26 @@ internal static class SmokeTest
     {
         Console.WriteLine("=== 桌面版冒烟测试 ===");
 
+        try
+        {
+            return RunCore();
+        }
+        catch (Exception ex)
+        {
+            // 关键：冒烟测试内部异常**不能冒泡**。
+            // 冒泡出去会变成进程崩溃退出码，CI 只看到「崩了」，
+            // 看不到是哪条断言没过 —— 冒烟测试就失去了意义。
+            // 这里把它变成一条普通的失败断言。
+            _fail++;
+            Console.WriteLine($"  FAIL 冒烟测试自身抛出异常 -> {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine(ex.StackTrace);
+            Console.WriteLine($"\n=== 结果: {_pass} 通过 / {_fail} 失败 ===");
+            return 1;
+        }
+    }
+
+    private static int RunCore()
+    {
         var asm = Assembly.GetExecutingAssembly();
 
         // --------------------------------------------------------
@@ -115,17 +135,26 @@ internal static class SmokeTest
         Check(File.Exists(index), "index.html 已释放");
 
         // index.html 里引用的资源都必须真实存在
-        var html = File.ReadAllText(index);
-        foreach (System.Text.RegularExpressions.Match m in
-                 System.Text.RegularExpressions.Regex.Matches(
-                     html, @"(?:href|src)=""([^""]+)"""))
+        // 读文件这一步本身也可能失败（没释放出来 / 被占用），
+        // 所以要单独兜住，不能让它冒泡成整个测试崩溃。
+        try
         {
-            var url = m.Groups[1].Value;
-            if (url.StartsWith("http") || url.StartsWith("data:") ||
-                url.StartsWith("//") || url.Length == 0) continue;
+            var html = File.ReadAllText(index);
+            foreach (System.Text.RegularExpressions.Match m in
+                     System.Text.RegularExpressions.Regex.Matches(
+                         html, @"(?:href|src)=""([^""]+)"""))
+            {
+                var url = m.Groups[1].Value;
+                if (url.StartsWith("http") || url.StartsWith("data:") ||
+                    url.StartsWith("//") || url.Length == 0) continue;
 
-            var local = Path.Combine(root, url.TrimStart('/'));
-            Check(File.Exists(local), $"index.html 引用的 {url} 存在");
+                var local = Path.Combine(root, url.TrimStart('/'));
+                Check(File.Exists(local), $"index.html 引用的 {url} 存在");
+            }
+        }
+        catch (Exception ex)
+        {
+            Check(false, "读取 index.html 并校验引用", $"{ex.GetType().Name}: {ex.Message}");
         }
 
         // --------------------------------------------------------
@@ -146,8 +175,16 @@ internal static class SmokeTest
 
         // 模块语法至少不能是空文件
         var mainJs = Path.Combine(root, "src/main.js");
-        Check(new FileInfo(mainJs).Length > 10_000,
-            "src/main.js 体积正常", "可能是空壳");
+        try
+        {
+            Check(new FileInfo(mainJs).Length > 10_000,
+                "src/main.js 体积正常", "可能是空壳");
+        }
+        catch (Exception ex)
+        {
+            Check(false, "src/main.js 体积正常",
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
 
         // --------------------------------------------------------
         // 3) 静态服务

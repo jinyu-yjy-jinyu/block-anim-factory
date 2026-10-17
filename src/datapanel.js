@@ -222,17 +222,17 @@ export class DataPanel {
     const self = this;
 
     const renderOne = async (row) => {
-      // 1) 变量插值：把 {{列}} 换成实际值
-      let ir = baseIR;
-      const ipt = (s) => interpolate(s, row, self.ds.columns, FORMATTERS);
-      for (const layer of ir.layers) {
-        for (const k of Object.keys(layer.props)) {
-          const v = layer.props[k];
-          if (typeof v === 'string') layer.props[k] = ipt(v);
-        }
-      }
-      // 2) 字段级绑定（面板里选的）
-      if (self.bindings.size) ir = applyFieldBindings(ir, baseIR, self.bindings, self.ds);
+      // 1) 变量插值：把 {{列}} 换成实际值。
+      //    必须走 bindRow —— 它内部 clone(ir) 后返回新对象。
+      //    原实现写的是 `let ir = baseIR` 再原地改 layer.props，
+      //    而 baseIR 就是用户当前工程的活对象（run(App.ir)），
+      //    结果占位符被第一行永久顶掉：N 行数据出 N 张一模一样的图，
+      //    并且点一下批量渲染就把用户工程改坏了。
+      //    formats 必须显式传：bindRow 里 `fns = fmtFns || FORMATTERS`，
+      //    传 {} 是 truthy，内置格式会整体失效。
+      let ir = bindRow(baseIR, row, self.ds.columns, { formats: FORMATTERS });
+      // 2) 字段级绑定（面板里选的），按当前行写进副本
+      if (self.bindings.size) ir = applyFieldBindings(ir, self.bindings, self.ds, row);
       // 3) 调用真正的渲染器
       if (!self.renderFn) throw new Error('未接入渲染器');
       return self.renderFn(ir, row);
@@ -332,8 +332,8 @@ function keyOf(b) {
     : `slot:${b.layerId}:${b.blockId}:${b.slotIndex}`;
 }
 
-/** 把面板里选的绑定写进 IR 副本 */
-function applyFieldBindings(ir, baseIR, bindings, ds) {
+/** 把面板里选的绑定写进 IR 副本（副本由调用方传入，本函数不碰外部对象） */
+function applyFieldBindings(ir, bindings, ds, row) {
   const byKey = new Map(ds.columns.map(c => [c.key, c]));
   const findTarget = (b) => {
     if (b.kind === 'prop') {
@@ -357,7 +357,9 @@ function applyFieldBindings(ir, baseIR, bindings, ds) {
     return found ? { obj: found, key: 'value' } : null;
   };
 
-  const bindables = findBindable(baseIR);
+  // 绑定目标是「当前 IR」里的位置。IR 已经是 bindRow 产出的新副本，
+  // 结构与 baseIR 一致，因此不用再拿 baseIR 去找。
+  const bindables = findBindable(ir);
   for (const [key, spec] of bindings) {
     const [colKey, fmtName] = String(spec).split('|');
     const col = byKey.get(colKey);
@@ -366,8 +368,25 @@ function applyFieldBindings(ir, baseIR, bindings, ds) {
     if (!b) continue;
     const target = findTarget(b);
     if (!target) continue;
-    // 这里只在「批量预览」时填值；真正逐行渲染由 buildQueue 里的插值完成
-    void fmtName;
+
+    // 取值 + 套用面板选的格式
+    let v = row ? row[col.key] : undefined;
+    if (v === undefined || v === null) v = '';
+    const fn = fmtName && FORMATTERS[fmtName];
+    if (fn) v = fn(v);
+
+    // 写回副本。原来这里只有一句 `void fmtName`，赋值从来没发生，
+    // 所以面板里选的字段绑定全部不生效且不报错。
+    if (target.key === 'value') {
+      // 槽位值：按目标类型包成对应的字面量，保留类型
+      const t = col.type === 'num' ? 'num' : 'str';
+      target.obj.value = t === 'num'
+        ? { k: 'lit', t: 'num', v: Number(v) || 0 }
+        : { k: 'lit', t: 'str', v: String(v) };
+    } else {
+      // 图层属性：数值列写数字，其余写字符串
+      target.obj[target.key] = col.type === 'num' && isFinite(Number(v)) ? Number(v) : String(v);
+    }
   }
   return ir;
 }

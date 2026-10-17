@@ -25,9 +25,6 @@ on:
         required: false
         default: ''
 
-permissions:
-  contents: write
-
 concurrency:
   group: desktop-${{ github.ref }}
   cancel-in-progress: true
@@ -36,6 +33,9 @@ jobs:
   build:
     name: 构建 Windows EXE
     runs-on: windows-latest
+    # .NET 冷构建 + 冒烟测试，给个上限。
+    # 之前这个 job 没声明，exe 不自行退出就会挂到 GitHub 默认的 360 分钟。
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -86,11 +86,23 @@ jobs:
 
           # 必须 -Wait：直接 `& xxx.exe` 对 WinExe 不等待，
           # $LASTEXITCODE 也是空的，断言全过也会被判失败。
-          $p = Start-Process -FilePath $exe.FullName `
-                             -ArgumentList '--smoke' `
-                             -NoNewWindow -Wait -PassThru
+          #
+          # 但 Start-Process -Wait 自己没有超时参数，exe 卡住就永远等下去。
+          # 这里改成手动启动 + Wait-Process -Timeout，超时后强杀进程树。
+          $timeoutSec = 120
+          $proc = Start-Process -FilePath $exe.FullName `
+                                 -ArgumentList '--smoke' `
+                                 -NoNewWindow -PassThru
+          try {
+            Wait-Process -Id $proc.Id -Timeout $timeoutSec -ErrorAction Stop
+          } catch {
+            Write-Host "::error::冒烟测试超过 ${timeoutSec}s 未退出，强杀进程树"
+            # taskkill /T 连子进程一起杀，避免留下占着 %TEMP% 的孤儿
+            taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
+            exit 1
+          }
 
-          Write-Host "进程退出码 = '$($p.ExitCode)'"
+          Write-Host "进程退出码 = '$($proc.ExitCode)'"
 
           $resultFile = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $resultFile) {
@@ -106,14 +118,9 @@ jobs:
           }
           Write-Host '冒烟测试通过'
 
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: 积木动画工厂-win-x64
-          path: desktop/out/**
-          retention-days: 30
-          if-no-files-found: error
-
+      # 清理必须在「上传产物」之前。
+      # 原来的顺序是先 upload 再清理，结果 artifact 里带着 smoke-exit.txt，
+      # 只有后面那个 zip 是干净的 —— 同一个 job 产出两种质量的产物。
       - name: 清理冒烟测试留下的文件
         shell: pwsh
         run: |
@@ -122,7 +129,16 @@ jobs:
             Remove-Item -Force
           Get-ChildItem '.\desktop\out\*.xml' -ErrorAction SilentlyContinue |
             Remove-Item -Force          # NuGet 包的 XML 文档，用户也用不上
+          Write-Host '清理后 desktop/out 内容：'
           Get-ChildItem '.\desktop\out' | Select-Object Name
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 积木动画工厂-win-x64
+          path: desktop/out/**
+          retention-days: 30
+          if-no-files-found: error
 
       - name: 打包 zip
         run: |
@@ -151,7 +167,17 @@ jobs:
     name: 挂到发行版
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    # 只有「手动触发且填了 tag」才挂。
+    # 以前写的是 `|| startsWith(github.ref, 'refs/tags/v')`，但 ci.yml 用
+    # GITHUB_TOKEN 推的 tag 不会触发本 workflow，那半个分支永远走不到；
+    # 而 workflow_dispatch 分支在不填 tag 时会拿 ref_name 回退成分支名 main，
+    # 于是往一个叫 main 的 tag 上挂 —— 静默挂错地方。
+    # 现在只认手动触发且输入非空的 tag，其余一律跳过。
+    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+
+    # 写权限只给这个 job。build job 不需要写仓库。
+    permissions:
+      contents: write
 
     steps:
       - name: 下载 zip
@@ -165,10 +191,9 @@ jobs:
         with:
           # 只指定 tag_name，不给 name/body：
           # 这样是「往已有发行版追加资源」，不会覆盖原有的说明文字。
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ inputs.tag }}
           files: dist/*.zip
           make_latest: false
 
-      - name: 说明（手动触发时）
-        if: github.event_name == 'workflow_dispatch'
-        run: echo "已把桌面版 EXE 挂到 ${{ github.event.inputs.tag || '（需要先指定 tag）' }}"
+      - name: 说明
+        run: echo "已把桌面版 EXE 挂到 ${{ inputs.tag }}"

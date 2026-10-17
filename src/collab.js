@@ -239,6 +239,20 @@ export class Repo {
       if (!baseLayers.has(id)) {
         merged.layers.push(clone(l));          // 两边各自新增且 id 不撞 → 直接进
         taken.push({ kind: 'layerAdded', layerId: id, name: l.name });
+      } else {
+        // base 里有、ours 里没有 → 是我方删掉的这个图层
+        // （theirs 也删了的话它根本不在 theirsLayers 里，进不到这里）
+        const bl = baseLayers.get(id);
+        if (sameLayer(bl, l)) {
+          taken.push({ kind: 'layerDeleted', layerId: id, name: l.name });   // 对方没动过 → 尊重我方的删除
+        } else {
+          // 对方改过它。原实现这一支什么都不做，而 merged 是 ours 的副本（已无此图层），
+          // 对方的改动就被静默丢了。这里与「对方删我改」对称化，交给用户决定。
+          conflicts.push({
+            kind: 'deleteVsEdit', layerId: id, name: l.name,
+            msg: `「${l.name}」在本地被删除，但对方分支改过（对方的改动会随删除一起丢掉）`,
+          });
+        }
       }
     }
 
@@ -267,14 +281,47 @@ export class Repo {
         target.blocks = res.blocks;
         target.props = res.props;
         target.visible = res.visible;
+        // 图层自身的字段（name / locked / type …）也要参与合并。
+        // 原实现只写回 blocks/props/visible，改名或改锁定会被静默丢掉。
+        const lf = mergeScalars(bl, ol, tl, {
+          label: `图层「${ol.name}」`, kind: 'layerFieldConflict',
+          skip: ['id', 'blocks', 'props'],
+        }, conflicts);
+        for (const k of Object.keys(lf)) if (k !== 'id') target[k] = lf[k];
       }
     }
+
+    // 标记点 / 变量：原实现从头到尾没有比较过它们，对方的改动静默消失
+    const mk = mergeIdList(base.markers, ours.ir.markers, theirs.ir.markers, {
+      unit: '标记点', kind: 'marker', nameOf: (m) => m && m.label,
+    });
+    merged.markers = mk.value;
+    conflicts.push(...mk.conflicts);
+    taken.push(...mk.taken);
+
+    const vr = mergeIdList(base.variables, ours.ir.variables, theirs.ir.variables, {
+      unit: '变量', kind: 'var', nameOf: (v) => v && v.name,
+    });
+    merged.variables = vr.value;
+    conflicts.push(...vr.conflicts);
+    taken.push(...vr.taken);
 
     // 项目级属性
     const projRes = mergeProject(base.project, ours.ir.project, theirs.ir.project);
     merged.project = projRes.value;
     conflicts.push(...projRes.conflicts);
     taken.push(...projRes.taken);
+
+    // 顶层兜底：上面显式处理过的 key 之外，遍历两侧并集，不同即冲突。
+    // 这样将来 IR 新增顶层字段时不会再静默丢改动。
+    const HANDLED = ['layers', 'markers', 'variables', 'project'];
+    const topRes = mergeScalars(
+      pick(base, HANDLED), pick(ours.ir, HANDLED), pick(theirs.ir, HANDLED),
+      { label: '工程', kind: 'topLevelConflict' }, conflicts);
+    // version 之类的元数据：只有一边改就采用，不必惊动用户
+    for (const k of Object.keys(topRes)) {
+      merged[k] = topRes[k];
+    }
 
     if (conflicts.length && !opts.force) {
       return { ok: false, conflicts, taken, merged: null };
@@ -381,17 +428,17 @@ function mergeLayer(base, ours, theirs) {
   const T = layerBlockSigs(theirs);
   const blocks = clone(ours.blocks || []);
 
-  if (B.join(' ') === O.join(' ')) {
+  if (B.join('\0') === O.join('\0')) {
     // ours 没改 → 整体取 theirs
     taken.push({ kind: 'blocksTheirs', msg: `「${ours.name}」的积木在对方分支被修改，已采用对方版本` });
     return { blocks: clone(theirs.blocks || []), props, visible: theirs.visible, conflicts, taken };
   }
-  if (B.join(' ') === T.join(' ')) {
+  if (B.join('\0') === T.join('\0')) {
     // theirs 没改 → 保留 ours
     taken.push({ kind: 'blocksKept', msg: `「${ours.name}」的积木只有你改过，已保留你的版本` });
     return { blocks, props, visible: ours.visible, conflicts, taken };
   }
-  if (O.join(' ') === T.join(' ')) {
+  if (O.join('\0') === T.join('\0')) {
     taken.push({ kind: 'blocksSame', msg: `「${ours.name}」两边改成了同样内容` });
     return { blocks, props, visible: ours.visible, conflicts, taken };
   }
@@ -457,16 +504,168 @@ function countChanged(a, b) {
   return n;
 }
 
-function mergeObject(base, ours, theirs, label, conflicts) {
+/**
+ * 三方合并一个普通对象（逐 key）。
+ * opts.kind     冲突种类，默认 propConflict（图层属性沿用）
+ * opts.keyLabel 生成 key 的可读名，默认「<label>的「<key>」」
+ * opts.fmt      值格式化，默认 JSON.stringify
+ */
+function mergeObject(base, ours, theirs, label, conflicts, opts = {}) {
   const out = Object.assign({}, ours);
+  const kind = opts.kind || 'propConflict';
+  const keyLabel = opts.keyLabel || ((k) => `${label}的「${k}」`);
+  const fmt = opts.fmt || ((v) => JSON.stringify(v));
   for (const k of Object.keys(theirs)) {
     const bv = base[k], ov = ours[k], tv = theirs[k];
     if (JSON.stringify(ov) === JSON.stringify(tv)) continue;       // 改成了同一个值
     if (JSON.stringify(bv) === JSON.stringify(ov)) { out[k] = tv; continue; }  // 只有对方改
     if (JSON.stringify(bv) === JSON.stringify(tv)) continue;                     // 只有我改
-    conflicts.push({ kind: 'propConflict', msg: `${label}的「${k}」两边改成了不同的值：你是 ${JSON.stringify(ov)}，对方是 ${JSON.stringify(tv)}` });
+    conflicts.push({ kind, msg: `${keyLabel(k)}两边改成了不同的值：你是 ${fmt(ov)}，对方是 ${fmt(tv)}` });
   }
   return out;
+}
+
+/** 把值压短，用于冲突提示（大对象整个塞进提示里没法看） */
+function brief(v) {
+  const s = JSON.stringify(v);
+  if (s === undefined) return '未设置';
+  return s.length > 80 ? s.slice(0, 80) + '…' : s;
+}
+
+function hasOwn(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+
+/** 取出一组 key（不含 skip 里的），用于「显式处理过的字段」之外的兜底比对 */
+function pick(o, skip) {
+  const out = {};
+  for (const k of Object.keys(o || {})) if (skip.indexOf(k) < 0) out[k] = o[k];
+  return out;
+}
+
+/**
+ * 单值三方取舍（含「这个字段在不在」也算改动的一部分）。
+ *   两边一样            → 通过
+ *   只有对方改          → 采用对方
+ *   只有我改            → 保留我的
+ *   两边改得不同        → 记一条冲突，保留我的
+ */
+function pickThree(bh, bv, oh, ov, th, tv, label, kind, fmt, conflicts) {
+  const eq = (pa, va, pb, vb) => pa === pb && JSON.stringify(va) === JSON.stringify(vb);
+  if (eq(th, tv, oh, ov)) return { has: oh, val: ov };      // 改成了同一个值
+  if (eq(bh, bv, oh, ov)) return { has: th, val: tv };      // 只有对方改
+  if (eq(bh, bv, th, tv)) return { has: oh, val: ov };      // 只有我改
+  conflicts.push({ kind, msg: `${label}两边改成了不同的值：你是 ${fmt(ov)}，对方是 ${fmt(tv)}` });
+  return { has: oh, val: ov };
+}
+
+/**
+ * 三方合并一组标量字段（遍历两侧 key 的并集，字段增删也算改动）。
+ * 用于图层自身的字段（name / visible / locked / type …）与顶层兜底字段。
+ */
+function mergeScalars(base, ours, theirs, cfg, conflicts) {
+  const label = cfg.label, kind = cfg.kind, fmt = cfg.fmt || brief, skip = cfg.skip || [];
+  const out = clone(ours || {});
+  const keys = new Set([...Object.keys(ours || {}), ...Object.keys(theirs || {})]);
+  for (const k of keys) {
+    if (skip.indexOf(k) >= 0) continue;
+    const res = pickThree(
+      hasOwn(base, k), (base || {})[k],
+      hasOwn(ours, k), (ours || {})[k],
+      hasOwn(theirs, k), (theirs || {})[k],
+      `${label}的「${k}」`, kind, fmt, conflicts);
+    if (res.has) out[k] = res.val; else delete out[k];
+  }
+  return out;
+}
+
+/**
+ * 按 id 做三方合并（标记点 / 变量共用）。
+ *
+ * 为什么需要它：merge() 原先只比对 layers 与 project，markers / variables
+ * 从头到尾没有被比较过一次 —— 它们在 merged = clone(ours.ir) 里原样保留，
+ * 于是「对方改了标记点 / 变量」的结果是 ok=true、无冲突、对方的改动静默消失。
+ *
+ * 规则与 layers 完全一致：
+ *   只有一边改 → 自动采用改的那边（不打扰用户）
+ *   两边改成一样 → 通过
+ *   两边改得不同 → 冲突（merge 默认遇冲突不提交，交给用户决定）
+ *   一边删一边改 → deleteVsEdit 冲突（两侧对称，任何一侧都不静默丢改动）
+ */
+function mergeIdList(baseArr, oursArr, theirsArr, cfg) {
+  const unit = cfg.unit, kind = cfg.kind, nameOf = cfg.nameOf, fmt = cfg.fmt || brief;
+  const conflicts = [], taken = [];
+  const byId = (arr) => new Map((arr || []).filter(x => x && x.id != null).map(x => [x.id, x]));
+  const B = byId(baseArr), O = byId(oursArr), T = byId(theirsArr);
+
+  // 输出顺序：先按 ours、再补 theirs 新增的，最后是只在 base 里出现过的
+  const order = [];
+  for (const arr of [oursArr, theirsArr]) {
+    for (const x of arr || []) if (x && x.id != null && order.indexOf(x.id) < 0) order.push(x.id);
+  }
+  for (const id of B.keys()) if (order.indexOf(id) < 0) order.push(id);
+
+  const out = [];
+  for (const id of order) {
+    const b = B.get(id), o = O.get(id), t = T.get(id);
+    const nm = (nameOf && nameOf(o || t || b)) || id;
+    const L = `${unit}「${nm}」`;
+    const push = (c) => conflicts.push(Object.assign({ id, name: nm }, c));
+
+    // 基线里没有 → 两边各自新增
+    if (!b) {
+      if (o && t) {
+        if (JSON.stringify(o) === JSON.stringify(t)) {
+          taken.push({ kind: `${kind}Same`, id, name: nm, msg: `${L}两边新增了相同内容` });
+        } else {
+          push({ kind: `${kind}BothAdded`, msg: `${L}两边都新增了同一个${unit}但内容不同：你是 ${fmt(o)}，对方是 ${fmt(t)}` });
+        }
+        out.push(clone(o));
+      } else if (t) {
+        out.push(clone(t));
+        taken.push({ kind: `${kind}Added`, id, name: nm, msg: `采用了对方新增的${L}` });
+      } else if (o) {
+        out.push(clone(o));
+      }
+      continue;
+    }
+
+    // 对方删了
+    if (!t) {
+      if (!o) continue;                                   // 两边都删，什么都不做
+      if (JSON.stringify(b) === JSON.stringify(o)) {
+        taken.push({ kind: `${kind}Deleted`, id, name: nm, msg: `${L}被对方删除，你未改动，已一并删除` });
+      } else {
+        push({ kind: 'deleteVsEdit', msg: `${L}在对方分支被删除，但你在本地改过` });
+        out.push(clone(o));
+      }
+      continue;
+    }
+
+    // 我删了、对方还在
+    if (!o) {
+      if (JSON.stringify(b) === JSON.stringify(t)) {
+        taken.push({ kind: `${kind}Deleted`, id, name: nm, msg: `${L}被你在本地删除，对方未改动，已删除` });
+      } else {
+        // 原实现这一支什么都不做 → 对方的改动静默消失；与上面「对方删我改」对称化
+        push({ kind: 'deleteVsEdit', msg: `${L}在本地被删除，但对方分支改过（对方的改动会随删除一起丢掉）` });
+      }
+      continue;
+    }
+
+    // 三方都在，且两边都改了 → 逐字段定位到底哪一项冲突
+    if (JSON.stringify(o) === JSON.stringify(t)) { out.push(clone(o)); continue; }
+    if (JSON.stringify(b) === JSON.stringify(o)) {
+      out.push(clone(t));
+      taken.push({ kind: `${kind}Theirs`, id, name: nm, msg: `${L}只有对方改过，已采用对方版本` });
+      continue;
+    }
+    if (JSON.stringify(b) === JSON.stringify(t)) { out.push(clone(o)); continue; }
+    const fc = [];
+    const merged = mergeScalars(b, o, t, { label: L, kind: `${kind}Conflict`, fmt, skip: ['id'] }, fc);
+    for (const c of fc) push(c);
+    out.push(merged);
+  }
+
+  return { value: out, conflicts, taken };
 }
 
 function mergeProject(base, ours, theirs) {

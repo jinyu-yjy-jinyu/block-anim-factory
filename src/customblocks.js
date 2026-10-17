@@ -336,33 +336,39 @@ export function findPlaceholders(blocks) {
  * · 积木型占位（op='placeholder'）→ 就地摊平实参子块到同一层
  */
 function substitutePlaceholders(blocks, args) {
+  /** 精确占位（整个值就是 `{x}`）：表达式位置应原样代入实参表达式。
+   *  原先对非 lit 的实参一律走 STR(a)，而 STR 是 `String(v)` ——
+   *  传进来一个表达式积木（{k:'blk'}）就被写成 "[object Object]" 字符串，
+   *  参数在求值之前就已经被毁掉。对象一律 clone 代入（lit 与 blk 都对），
+   *  只有原始值才转成字符串字面量。 */
+  const injectArg = (a) => (a && typeof a === 'object' ? clone(a) : STR(a));
+  /** 文本里的内嵌占位（整串不是单个 `{x}`，如 `时长={dur}s`）：按字符串规则替换。
+   *  实参本身是对象（表达式/积木/子块列表）时无法写进一段文本，
+   *  保留原占位符而不是写进 "[object Object]"。 */
+  const inlineSub = (s) => s.replace(PH_RE, (mm, name) => {
+    const a = args[name];
+    if (a === undefined) return mm;
+    if (a && typeof a === 'object' && a.k === 'lit') return String(a.v == null ? '' : a.v);
+    if (a && typeof a === 'object') return mm;
+    return String(a);
+  });
   /** 把一个「值」里的 {name} 占位替换掉 */
   const subValue = (v) => {
     if (v === null || v === undefined) return v;
     if (typeof v === 'string') {
       const m = v.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
-      if (m && args[m[1]] !== undefined) {
-        const a = args[m[1]];
-        return (a && typeof a === 'object' && a.k === 'lit') ? clone(a) : STR(a);
-      }
-      if (/\{[a-zA-Z_]/.test(v)) {
-        return { k: 'lit', t: 'str', v: v.replace(PH_RE, (mm, name) => {
-          const a = args[name];
-          if (a === undefined) return mm;
-          if (a && typeof a === 'object' && a.k === 'lit') return String(a.v == null ? '' : a.v);
-          return String(a);
-        }) };
-      }
+      if (m && args[m[1]] !== undefined) return injectArg(args[m[1]]);
+      if (/\{[a-zA-Z_]/.test(v)) return { k: 'lit', t: 'str', v: inlineSub(v) };
       return v;
     }
     if (v && typeof v === 'object' && v.k === 'lit') {
       if (typeof v.v === 'string' && /\{[a-zA-Z_]/.test(v.v)) {
         const m2 = v.v.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
-        if (m2 && args[m2[1]] !== undefined) {
-          const a = args[m2[1]];
-          if (a && typeof a === 'object' && a.k === 'lit') return clone(a);
-          return { k: 'lit', t: 'str', v: String(a) };
-        }
+        if (m2 && args[m2[1]] !== undefined) return injectArg(args[m2[1]]);
+        // 内嵌占位（原实现只处理了整串就是单个 {x} 的情况）：
+        // `{k:'lit',t:'time',v:'时长={dur}'}` 这类带前后缀的占位此前永远不生效 ——
+        // 形参在面板上配了却没作用，且不报错。
+        return { ...v, v: inlineSub(v.v) };
       }
       return v;
     }

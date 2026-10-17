@@ -15,6 +15,7 @@ Thumbs.db
 # 测试/截图过程中的临时文件
 _chk.mjs
 dbg*.mjs
+test-mp4-output.mp4
 
 # .NET / 桌面版构建产物
 bin/
@@ -28,5 +29,3 @@ smoke-exit.txt
 
 # 注意：screenshots/ 是 README 引用的产物，**故意提交**
 # 注意：desktop/app.ico 是应用图标，**故意提交**（否则 CI 上没有图标）
-# һ�����ύ�ĸ�Ŀ¼�ļ�
-/BlockAnim.cs

@@ -29,20 +29,16 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      # 逻辑套件不依赖浏览器，拆出来先跑，失败能更快看到
-      - name: 逻辑套件
-        run: |
-          node run-tests.mjs
-          node test-audio.mjs
-          node test-video.mjs
-          node test-custom.mjs
-          node test-scene.mjs
-          node test-node-batch.mjs
-          node test-v3v4.mjs
-          node test-pipeline.mjs
+      # playwright-core 只是个驱动库，不自带浏览器。
+      # 不装 chromium 的话，两个浏览器套件会被判「无浏览器」跳过并记为通过。
+      - name: 安装 Chromium（浏览器套件要用）
+        run: npx playwright install --with-deps chromium
 
-      # 浏览器套件在 ubuntu 上没有 Chrome，会自动跳过
-      - name: 全量测试
+      # 全部 10 个套件跑一次。
+      # 以前这里先逐个 node 跑 8 个逻辑套件、再 npm test 跑一遍全部，
+      # 同样的断言跑两遍、CI 时间翻倍。现在只保留 npm test。
+      # 浏览器套件靠下面安装的 chromium 真正执行，不再跳过。
+      - name: 全量测试（10 套件）
         run: npm test
 
       - name: 上传测试产物
@@ -70,10 +66,13 @@ jobs:
           node-version: '20'
 
       # 本项目零构建 —— 「构建」就是把源码打成 zip，无需 node_modules
+      # 注意：desktop/ 和 package-lock.json 必须一起打包。
+      #   desktop/      —— 缺了它，README 里的 npm run desktop:build 必然失败
+      #   package-lock.json —— 缺了它，用户 npm install 装不出可复现的依赖
       - name: 打包源码
         run: |
           mkdir -p dist
-          cp -r index.html src scripts package.json README.md .gitignore dist/
+          cp -r index.html src scripts desktop package.json package-lock.json README.md .gitignore dist/
           cp run-tests.mjs test-*.mjs make-screenshots.mjs dist/
           mkdir -p dist/screenshots
           cp screenshots/*.png dist/screenshots/
@@ -150,9 +149,9 @@ jobs:
             ```
             也可以用任意静态服务器指向解压目录。
 
-            **不想用命令行的话，下载同一标签下的 `block-anim-factory-win-x64.zip`
-            （Windows 桌面版），解压后双击 `积木动画工厂.exe` 即可 —— 功能完全一致。**
-            桌面包由 `桌面版 EXE` workflow 在同一标签上构建，稍后会出现。
+            **不想用命令行的话，可以在 Actions 页面手动触发「桌面版 EXE」workflow，
+            在 `tag` 输入框填上本次的标签（例如 `v0.4.1`），构建完成后 EXE 会自动挂到这个发行版上。**
+            桌面版需要 .NET 8 构建环境，所以比网页版慢几分钟；**桌面包不会自动出现，需要手动触发一次。**
 
             ### 本次包含
             - **统一 IR**：积木与节点视图共用一份数据，双向映射可验证无损
@@ -168,4 +167,4 @@ jobs:
             - **版本协作**：提交历史、分支、三方合并
 
             ### 质量
-            10 个测试套件、430+ 项断言（含真实 Chrome 端到端与像素级画面断言）在 CI 中全部通过。
+            10 个测试套件、430+ 项断言在 CI 中全部通过，其中包含真实 Chromium 驱动的端到端与像素级画面断言。

@@ -35,8 +35,16 @@ export class DataSource {
   stats(key) {
     const v = this.column(key);
     if (!v.length) return { min: 0, max: 0, sum: 0, avg: 0 };
-    const sum = v.reduce((a, b) => a + b, 0);
-    return { min: Math.min(...v), max: Math.max(...v), sum, avg: sum / v.length };
+    // 用循环求最值：Math.min(...v) 会把数组展开成实参，
+    // 行数上十万时会超出调用栈上限抛 RangeError。
+    let min = Infinity, max = -Infinity, sum = 0;
+    for (let i = 0; i < v.length; i++) {
+      const n = v[i];
+      if (n < min) min = n;
+      if (n > max) max = n;
+      sum += n;
+    }
+    return { min, max, sum, avg: sum / v.length };
   }
 
   /** 按条件过滤（规划：条件渲染） */
@@ -406,7 +414,7 @@ export class BatchQueue {
   constructor(opts = {}) {
     this.tasks = [];                    // {id, rowIndex, row, name, status, attempts, error, blob}
     this.concurrency = opts.concurrency || 1;
-    this.maxRetries = opts.maxRetries || 2;
+    this.maxRetries = opts.maxRetries ?? 2;   // 0 是「不重试」，不能用 || 当成缺省值
     this.results = [];
     this.state = 'idle';                // idle | running | paused | done
     this._aborted = false;
@@ -419,7 +427,11 @@ export class BatchQueue {
     q.renderFn = renderFn;
     ds.rows.forEach((row, i) => {
       q.tasks.push({
-        id: uid('T'),
+        // 用行号做稳定 id。原实现用 uid('T') 随机生成，
+        // 队列重建后 id 全变，restoreProgress 按 id 匹配永远命中 0，
+        // 「断点续渲」原理上就不可能工作。行号在数据源不变时是稳定唯一的，
+        // 这正是断点续渲的语义前提（数据源变了由指纹拦下）。
+        id: 'T' + i,
         rowIndex: i,
         row,
         name: q.nameFor(row, i, opts),
@@ -463,19 +475,47 @@ export class BatchQueue {
     return { total, done, failed, running, pending: total - done - failed - running, percent: total ? done / total : 0 };
   }
 
-  /** 断点续渲：只跑未完成的任务 */
+  /** 当前队列的数据源指纹：行数 + 列签名（键/名/类型）。用于校验进度是否还能对得上。 */
+  _dsFingerprint() {
+    const ds = this.ds;
+    if (!ds) return '';
+    // parseDelimited 生成的列 key 恒为 c0/c1/…，光看 key 区分不出改表头，
+    // 所以把 label 与 type 一并纳入签名。
+    const cols = (ds.columns || []).map(c => `${c.key}:${c.label}:${c.type}`).join('|');
+    return `${ds.rows.length}#${cols}`;
+  }
+
+  /**
+   * 断点续渲：只跑未完成的任务。
+   * 返回恢复条数；数据源与保存进度时不一致（增删行/改列）则返回 0 不恢复，
+   * 避免按行号恢复出错误的行 —— 不静默错位。
+   */
   restoreProgress(saved) {
-    const map = new Map((saved || []).map(s => [s.id, s]));
+    // 入参是数组（旧格式，无指纹则不校验）或带 done 的对象
+    const list = Array.isArray(saved) ? saved : (saved && saved.done) || [];
+    const fp = saved && saved.fingerprint;
+    if (fp != null && fp !== this._dsFingerprint()) return 0;
+    const map = new Map(list.map(s => [s.id, s]));
     let restored = 0;
     for (const t of this.tasks) {
       const s = map.get(t.id);
-      if (s && s.status === 'done') { t.status = 'done'; t.attempts = s.attempts || 1; restored++; }
+      // serializeProgress 已 filter 过 status === 'done'，这里每条必然已完成，
+      // 不能再判断 s.status（该字段不存在，原实现因此永远恢复不出东西）。
+      if (s) { t.status = 'done'; t.attempts = s.attempts || 1; restored++; }
     }
     return restored;
   }
 
+  /**
+   * 存进度：只存已完成项，并带上数据源指纹供 restoreProgress 校验。
+   * 返回数组（契约不变），指纹挂在数组的 fingerprint 属性上，
+   * 这样 .length / 遍历 / JSON 序列化（指纹丢失则降级为不校验）都不受影响。
+   */
   serializeProgress() {
-    return this.tasks.filter(t => t.status === 'done').map(t => ({ id: t.id, name: t.name, attempts: t.attempts }));
+    const done = this.tasks.filter(t => t.status === 'done')
+      .map(t => ({ id: t.id, name: t.name, attempts: t.attempts }));
+    done.fingerprint = this._dsFingerprint();
+    return done;
   }
 
   abort() { this._aborted = true; this.state = 'idle'; }
@@ -486,11 +526,15 @@ export class BatchQueue {
     this._aborted = false;
     const pending = this.tasks.filter(t => t.status !== 'done');
     const workers = [];
-    let cursor = 0;
 
     const take = () => {
-      while (cursor < pending.length && pending[cursor].status !== 'pending') cursor++;
-      return cursor < pending.length ? pending[cursor++] : null;
+      // 每次从头重扫。原实现用只前进的 cursor，失败项被置回 pending 后
+      // 落在 cursor 之前就永远扫不到，会一直卡在 pending。
+      // 终止性由 attempts / maxRetries 保证：重试超限后状态变 failed，不再为 pending。
+      for (let i = 0; i < pending.length; i++) {
+        if (pending[i].status === 'pending') return pending[i];
+      }
+      return null;
     };
 
     const worker = async () => {

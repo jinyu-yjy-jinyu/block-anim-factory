@@ -56,12 +56,18 @@ export class TimelineDebugger {
     this.vars.clear();
     this.stopAt = null;
 
+    // 深度表：整棵树扫一遍，得到 id → 嵌套深度。
+    // 原实现在 onBlock 里对**每执行一块**调 depthOf()，而 depthOf 会
+    // 从图层列表开始重扫全树 —— 一块一次全树遍历，整帧就是
+    // O(块数²)。大工程里单步调试因此明显发卡。
+    const depthMap = buildDepthMap(ir);
+
     const dbg = this;
     const hooks = {
       onBlock(b, def, tNow) {
         dbg.trace.push({
           id: b.id, op: b.op, label: def ? def.label : b.op,
-          depth: depthOf(dbg, b.id), t: tNow,
+          depth: depthMap.has(b.id) ? depthMap.get(b.id) : 0, t: tNow,
           hit: dbg.breakpoints.has(b.id),
         });
         if (dbg.breakpoints.has(b.id)) {
@@ -103,7 +109,28 @@ export class TimelineDebugger {
   }
 }
 
-/* 积木嵌套深度（按 id 查找路径） */
+/* 一次性建「积木 id → 嵌套深度」表。
+   原来每块都要 depthOf() 全树重扫，整帧是 O(n²)；
+   现在一次 O(n) 建表，之后每块 O(1) 查。 */
+function buildDepthMap(ir) {
+  const map = new Map();
+  if (!ir || !ir.layers) return map;
+  const walk = (list, d) => {
+    for (const b of list || []) {
+      if (!b) continue;
+      if (!map.has(b.id)) map.set(b.id, d);
+      if (b.slots) {
+        for (const s of b.slots) {
+          if (Array.isArray(s.value)) walk(s.value, d + 1);
+        }
+      }
+    }
+  };
+  for (const l of ir.layers) walk(l.blocks, 0);
+  return map;
+}
+
+/* 积木嵌套深度（按 id 查找路径）。保留给外部/兼容用；evaluate 内部已改用 depthMap。 */
 function depthOf(dbg, id) {
   if (!dbg.ir) return 0;
   const layer = dbg.ir.layers.find(l => (l.blocks || []).some(b => b.id === id));

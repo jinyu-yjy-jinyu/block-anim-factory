@@ -270,8 +270,10 @@ export class AudioSource {
 
     const tr = this.tracks.find(x => !x.muted && x.samples.length && t >= (x.start || 0) && t < (x.start || 0) + x.duration);
     if (!tr) return new Array(bins).fill(0);
-    const a = tr.ensureAnalysis();
-    const spec = a.spectrogram;
+    // 频谱存在 track.spectrogram 上（由 prepareTrack 写入），不在 analysis 里 ——
+    // 以前读 a.spectrogram 恒为 undefined，频谱就永远是平的。
+    // 这里顺带补上「没预计算就现算一次」的兜底，缓存挂在轨道上，不会重复计算。
+    const spec = ensureSpectrogram(tr);
     if (!spec) return new Array(bins).fill(0);
 
     const offset = tr.start || 0;
@@ -367,6 +369,14 @@ function computeSpectrogramCached(track, opts = {}) {
     });
   }
   return track[key];
+}
+
+/** 取轨道的频谱，没有就现算一次并缓存（频谱图开销大，只算一次） */
+export function ensureSpectrogram(track) {
+  if (!track) return null;
+  if (track.spectrogram) return track.spectrogram;
+  track.spectrogram = computeSpectrogramCached(track);
+  return track.spectrogram;
 }
 
 /* 避免顶层循环依赖：延迟取用 */

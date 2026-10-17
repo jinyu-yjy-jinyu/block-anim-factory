@@ -14,25 +14,69 @@
         Background="#0b0e14">
 
   <Grid>
-    <!-- 启动占位：避免 WebView2 初始化期间的白屏闪烁 -->
+    <!-- 启动占位：避免 WebView2 初始化期间的白屏闪烁。
+         Border 只能有一个子级，所以用 Grid 承载「加载中」与「加载失败」两块，
+         切换时只改各自的 Visibility。 -->
     <Border x:Name="LoadingPanel" Background="#0b0e14">
-      <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-        <TextBlock Text="积木动画工厂"
-                   Foreground="#e6ecf5"
-                   FontSize="26"
-                   FontWeight="SemiBold"
-                   HorizontalAlignment="Center"/>
-        <TextBlock Text="正在启动…"
-                   Foreground="#5a5f6e"
-                   FontSize="13"
-                   Margin="0,10,0,0"
-                   HorizontalAlignment="Center"/>
-        <ProgressBar Width="190" Height="3" Margin="0,16,0,0"
-                     IsIndeterminate="True"
-                     Foreground="#4a8cff"
-                     Background="#1b1f2a"
-                     BorderThickness="0"/>
-      </StackPanel>
+      <Grid>
+        <StackPanel x:Name="LoadingContent" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <TextBlock Text="积木动画工厂"
+                     Foreground="#e6ecf5"
+                     FontSize="26"
+                     FontWeight="SemiBold"
+                     HorizontalAlignment="Center"/>
+          <TextBlock Text="正在启动…"
+                     Foreground="#5a5f6e"
+                     FontSize="13"
+                     Margin="0,10,0,0"
+                     HorizontalAlignment="Center"/>
+          <ProgressBar Width="190" Height="3" Margin="0,16,0,0"
+                       IsIndeterminate="True"
+                       Foreground="#4a8cff"
+                       Background="#1b1f2a"
+                       BorderThickness="0"/>
+        </StackPanel>
+
+        <!--
+          启动失败兜底 UI。
+          原来导航失败时 LoadingPanel 永久停在「正在启动…」，
+          用户只看到一个转不动的进度条加黑背景，完全不知道发生了什么。
+          这里默认隐藏，失败时才显示。
+        -->
+        <StackPanel x:Name="LoadErrorPanel"
+                    Visibility="Collapsed"
+                    MaxWidth="620"
+                    Margin="32"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+          <TextBlock Text="启动失败"
+                     Foreground="#ff6b6b"
+                     FontSize="24"
+                     FontWeight="SemiBold"/>
+          <TextBlock x:Name="LoadErrorText"
+                     Foreground="#c8d0dc"
+                     FontSize="13"
+                     TextWrapping="Wrap"
+                     LineHeight="20"
+                     Margin="0,12,0,0"/>
+          <TextBlock Foreground="#5a5f6e"
+                     FontSize="12"
+                     TextWrapping="Wrap"
+                     LineHeight="18"
+                     Margin="0,14,0,0">
+            <Run Text="诊断日志："/><Run x:Name="LoadErrorLogPath" Text=""/>
+          </TextBlock>
+          <TextBlock Foreground="#5a5f6e"
+                     FontSize="12"
+                     TextWrapping="Wrap"
+                     LineHeight="18"
+                     Margin="0,8,0,0"
+                     Text="如果提示缺少 WebView2 运行时，请安装 Microsoft Edge WebView2 Runtime：https://developer.microsoft.com/microsoft-edge/webview2/" />
+          <Button Content="重试" Width="110" Height="32"
+                  HorizontalAlignment="Left" Margin="0,18,0,0"
+                  Click="OnRetryClick"/>
+        </StackPanel>
+      </Grid>
     </Border>
 
     <wv2:WebView2 x:Name="WebView" Visibility="Collapsed" />

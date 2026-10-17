@@ -35,6 +35,15 @@ public partial class BlockAnim : Window
 {
     private const string Host = "127.0.0.1";
 
+    /// <summary>本地静态服务的并发上限。浏览器加载一个页面会并发几十上百个模块请求。</summary>
+    private const int MaxConcurrentRequests = 64;
+
+    /// <summary>
+    /// 读一个请求头允许的最长等待。
+    /// 客户端连上却不发数据时，没有这个上限线程会一直挂着。
+    /// </summary>
+    private const int HeaderReadTimeoutMs = 5000;
+
     /// <summary>
     /// 启动诊断日志。启动失败时把路径告诉用户，免得白屏一脸懵。
     /// </summary>
@@ -130,6 +139,16 @@ public partial class BlockAnim : Window
             if (!args.IsSuccess)
             {
                 Log($"导航失败：{args.WebErrorStatus}");
+                // 原来这里只写日志就 return，LoadingPanel 永久停在
+                // 「正在启动…」——用户看到的是一个转不动的进度条加黑背景，
+                // 完全不知道发生了什么。文件头 :38 的注释说「启动失败时把
+                // 路径告诉用户」，这个意图只在 OnLoaded 的 try/catch 里兑现了，
+                // 导航失败这条路没有。补上。
+                ShowLoadError(
+                    $"无法加载本地页面（错误码 {args.WebErrorStatus}）。\n\n" +
+                    $"地址：http://{Host}:{_port}/\n\n" +
+                    "常见原因：本地服务已被其它程序占用、杀软拦截了回环连接、" +
+                    "或 WebView2 运行时缺失。");
                 return;
             }
             // 页面 ready 后再切换，避免白屏闪一下
@@ -138,6 +157,41 @@ public partial class BlockAnim : Window
         };
 
         core.Navigate(url);
+    }
+
+    /// <summary>显示启动失败 UI，并把 LoadingPanel 留在可见状态（不要藏掉它）</summary>
+    private void ShowLoadError(string message)
+    {
+        try
+        {
+            LoadingContent.Visibility = Visibility.Collapsed;
+            LoadErrorLogPath.Text = DiagLog;
+            LoadErrorText.Text = message;
+            LoadErrorPanel.Visibility = Visibility.Visible;
+            LoadingPanel.Visibility = Visibility.Visible;
+        }
+        catch (Exception ex)
+        {
+            // 连失败 UI 都画不出来时，至少别让用户对着一个假进度条发呆
+            Log("显示失败 UI 时又出错：" + ex);
+            MessageBox.Show(
+                message,
+                "积木动画工厂 · 启动失败",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void OnRetryClick(object sender, RoutedEventArgs e)
+    {
+        // 回到「正在启动…」并重新走一遍加载流程
+        LoadingContent.Visibility = Visibility.Visible;
+        LoadErrorPanel.Visibility = Visibility.Collapsed;
+        WebView.Visibility = Visibility.Collapsed;
+        Log("用户点击重试");
+        // OnLoaded 是 async void，内部自带 try/catch，
+        // 异常不会冒到这里，所以直接调用即可（不能写成 `_ = OnLoaded(...)`，
+        // 那是对 void 赋值，编译不过）。
+        OnLoaded(sender, e);
     }
 
     // ============================================================
@@ -294,17 +348,37 @@ public partial class BlockAnim : Window
     {
         var rootFull = Path.GetFullPath(root);
 
+        // 并发上限：浏览器加载页面会并发发几十上百个模块请求，
+        // 而每个请求一个 new Thread 没有上限。
+        // 更实际的风险是：客户端连上不发数据就断开时，HandleClient
+        // 会阻塞在 ReadByte 上，线程不退；反复触发就把线程资源耗光。
+        // 用信号量限流 + 有界线程池，超出的请求直接拒掉。
+        var gate = new SemaphoreSlim(MaxConcurrentRequests);
+
         while (true)
         {
             TcpClient client;
             try { client = tcp.AcceptTcpClient(); }
             catch { return; }                 // 已停止
 
-            // 本地只有一个客户端，每个请求起一个后台线程足够
-            new Thread(() => HandleClient(client, rootFull))
+            // 拿不到许可就直接断开，不排队 —— 本机只服务一个 WebView，
+            // 排队毫无意义，只会把挂死的连接堆在内存里。
+            if (!gate.Wait(0))
             {
-                IsBackground = true
-            }.Start();
+                Log($"并发已达上限（{MaxConcurrentRequests}），拒绝新连接");
+                try { client.Close(); } catch { }
+                continue;
+            }
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try { HandleClient(client, rootFull); }
+                catch { }
+                finally
+                {
+                    try { gate.Release(); } catch { }
+                }
+            });
         }
     }
 
@@ -383,14 +457,33 @@ public partial class BlockAnim : Window
         return ext.Length > 0 && Mime.ContainsKey(ext);
     }
 
-    /// <summary>读请求头，直到遇到空行</summary>
+    /// <summary>
+    /// 读请求头，直到遇到空行。
+    ///
+    /// 读超时是必需的，不是保险：65536 的上限只能防「超大请求头」，
+    /// 防不住「连上不发」或「发一半就停」——这两种情况下
+    /// ReadByte 会一直等下去，线程永不退出。
+    /// </summary>
     private static string? ReadHeaders(NetworkStream stream)
     {
         var sb = new StringBuilder();
 
+        // 单次读取的等待上限。超过就当作「这个请求废了」。
+        var deadline = DateTime.UtcNow.AddMilliseconds(HeaderReadTimeoutMs);
+        // ReadTimeout 只对同步 Read 生效，ReadByte 走的是同一层，
+        // 但显式设一次更保险（有些实现路径不看它）。
+        try { stream.ReadTimeout = HeaderReadTimeoutMs; } catch { }
+
         while (sb.Length < 65536)
         {
-            // 逐字节找 \r\n\r\n —— 请求头很小，逐字节最简单也最可靠
+            // 逐字节找 \r\n\r\n —— 请求头很小，逐字节最简单也最可靠。
+            // 但必须每轮检查时限，否则一个不发数据的连接能挂住线程到底。
+            if (DateTime.UtcNow > deadline)
+            {
+                Log("读请求头超时，放弃该连接");
+                return null;
+            }
+
             var b = stream.ReadByte();
             if (b < 0) break;
             sb.Append((char)b);
@@ -426,7 +519,18 @@ public partial class BlockAnim : Window
     private static void WriteSimple(Stream stream, int code, string message)
     {
         var body = Encoding.UTF8.GetBytes(message);
-        var reason = code == 403 ? "Forbidden" : "Method Not Allowed";
+        // reason 短语要和状态码对上。原来写成
+        // `code == 403 ? "Forbidden" : "Method Not Allowed"`，
+        // 于是 404 被标成「Method Not Allowed」，响应行自相矛盾
+        // （「HTTP/1.1 404 Method Not Allowed」），抓包一眼就看出来。
+        // 与 SmokeTest.cs:319 的探针版本保持一致。
+        var reason = code switch
+        {
+            403 => "Forbidden",
+            404 => "Not Found",
+            405 => "Method Not Allowed",
+            _ => "OK",
+        };
 
         var head = Encoding.UTF8.GetBytes(
             $"HTTP/1.1 {code} {reason}\r\n" +

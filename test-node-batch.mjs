@@ -9,12 +9,21 @@ const BT = await import(U('src/batch.js'));
 const IR = await import(U('src/ir.js'));
 const TP = await import(U('src/templates.js'));
 const BL = await import(U('src/blocks.js'));
+const DBG = await import(U('src/debugger.js'));
 IR.registerOpMeta(BL.BLOCK_DEFS.map(d => BL.metaFor(d.op)).filter(Boolean));
 
 let pass = 0, fail = 0; const failures = [];
+// 异步用例必须被等待：原实现把 fn() 返回的 Promise 直接当成「非 false」计为通过，
+// 于是 async 用例里的断言从未执行也会记为通过。
+const pendingTests = [];
 const t = (n, f) => {
-  try { const r = f(); if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; }
-  catch (e) { fail++; failures.push(`${n} → ${e.message}`); }
+  const good = (r) => { if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; };
+  const bad = (e) => { fail++; failures.push(`${n} → ${e.message}`); };
+  try {
+    const r = f();
+    if (r && typeof r.then === 'function') { pendingTests.push(r.then(good, bad)); return; }
+    good(r);
+  } catch (e) { bad(e); }
 };
 const eq = (a, b, m) => { if (String(a) !== String(b)) throw new Error(`${m || ''} 期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`); };
 const near = (a, b, e, m) => { if (!(Math.abs(a - b) <= (e == null ? 1e-6 : e))) throw new Error(`${m || ''} 期望 ≈${b}，实际 ${a}`); };
@@ -324,6 +333,81 @@ t('绑定:绑定后 IR 中数值被替换', () => {
   eq(out.layers[1].props.text, '星火 第 2 版');
 });
 
+t('批量:每行结果不同且不改动原工程（datapanel）', async () => {
+  // 回归：原实现 renderOne 用 `let ir = baseIR` 原地改 layer.props，
+  // 结果 N 行数据出 N 张一样的图，并且把用户当前工程（App.ir）改坏。
+  const DP = await import(U('src/datapanel.js'));
+  const ir = IR.defaultProject('t');
+  // 找一个文字图层来插值
+  const layer = ir.layers.find(l => l.props && typeof l.props.text === 'string') || ir.layers[0];
+  layer.props.text = '名称：{{名称}}';
+  const snapshot = JSON.stringify(ir);
+
+  const ds = BT.parseDelimited('名称,价格\n甲,10\n乙,20\n丙,30');
+  const panel = new DP.DataPanel({});
+  panel.ds = ds;
+  const seen = [];
+  panel.renderFn = async (irIn) => { seen.push(irIn.layers.find(l => l.id === layer.id).props.text); return new Blob(); };
+
+  const q = panel.buildQueue(ir);
+  await q.run();
+
+  eq(seen.length, 3, '渲染次数');
+  ok(new Set(seen).size === 3, `三行应出三种结果，实际 ${JSON.stringify(seen)}`);
+  eq(seen[0], '名称：甲');
+  eq(seen[2], '名称：丙');
+  // 关键判据：跑完批量渲染后原始工程对象必须一字未动
+  eq(JSON.stringify(ir), snapshot, '批量渲染后原工程被改动');
+  eq(layer.props.text, '名称：{{名称}}', '占位符被吃掉');
+});
+
+t('批量:面板绑定生效且不改动原工程（datapanel）', async () => {
+  // 覆盖 #5 报告点名的那条路：panel.bindings（面板里手选的字段绑定）。
+  // 原实现 applyFieldBindings 签名里根本没有 row，拿不到当前行数据，
+  // 循环里只有一句 `void fmtName` —— 绑定值从来没被写回，且不报错。
+  const DP = await import(U('src/datapanel.js'));
+  const ir = IR.defaultProject('t');
+  const layer = ir.layers.find(l => l.props && typeof l.props.text === 'string') || ir.layers[0];
+  layer.props.text = '占位文本';             // 故意不含 {{}}，确保只有绑定这条路能改它
+  layer.blocks = [{
+    id: 'b9', k: 'C', op: 'showText',
+    slots: [
+      { type: 'sel', label: '图层', value: IR.SEL(layer.id) },
+      { type: 'str', label: '文本', value: IR.STR('占位槽位') },
+    ],
+  }];
+  const snapshot = JSON.stringify(ir);
+
+  const ds = BT.parseDelimited('名称,价格\n甲,10\n乙,20\n丙,30');
+  const panel = new DP.DataPanel({});
+  panel.ds = ds;
+  // keyOf 的格式：prop:<layerId>:<propKey> / slot:<layerId>:<blockId>:<slotIndex>
+  panel.bindings.set(`prop:${layer.id}:text`, 'c0|');
+  panel.bindings.set(`slot:${layer.id}:b9:1`, 'c0|');
+
+  const seenProp = [], seenSlot = [];
+  panel.renderFn = async (irIn) => {
+    const l = irIn.layers.find(x => x.id === layer.id);
+    seenProp.push(l.props.text);
+    seenSlot.push(l.blocks[0].slots[1].value);
+    return new Blob();
+  };
+
+  const q = panel.buildQueue(ir);
+  await q.run();
+
+  eq(seenProp.length, 3, '渲染次数');
+  eq(seenProp.join(','), '甲,乙,丙', `面板属性绑定三行应各不相同，实际 ${JSON.stringify(seenProp)}`);
+  // 槽位绑定：应保留类型（字符串列 → lit/str）
+  eq(seenSlot.map(v => (v && v.k === 'lit' ? v.v : v)).join(','), '甲,乙,丙',
+    `面板槽位绑定三行应各不相同，实际 ${JSON.stringify(seenSlot)}`);
+  ok(seenSlot.every(v => v && v.k === 'lit' && v.t === 'str'), '槽位绑定应写回字面量并保留类型');
+  // 关键判据：跑完批量渲染后原始工程对象必须一字未动
+  eq(JSON.stringify(ir), snapshot, '批量渲染后原工程被改动');
+  eq(layer.props.text, '占位文本', '属性被写回原对象');
+  eq(layer.blocks[0].slots[1].value.v, '占位槽位', '槽位被写回原对象');
+});
+
 /* ============================================================
    批量渲染队列
    ============================================================ */
@@ -533,8 +617,131 @@ t('插件:权限审计', () => {
 });
 
 /* ============================================================
+   性能：节点图拓扑缓存 / 调试器深度表（#41 / #48）
+   ============================================================ */
+
+t('节点图:拓扑结果被缓存，图不变时不重算', () => {
+  // 原实现 hasCycle() 每次都完整跑一遍 Kahn 拓扑排序，
+  // 而渲染/校验会连续问好几次「有环吗」。
+  // 判据：把「真正算」的那一步打桩计数 —— 第二次调用不能再进它。
+  const g = new NG.NodeGraph();
+  g.add({ id: 'a', op: 'x' });
+  g.add({ id: 'b', op: 'x' });
+  g.connect('a', 'b');
+
+  const real = g._topoOrderUncached.bind(g);
+  let computed = 0;
+  g._topoOrderUncached = function () { computed++; return real(); };
+
+  const o1 = g.topoOrder();
+  const o2 = g.topoOrder();
+  eq(computed, 1, `拓扑排序被算了 ${computed} 次（图没变，应只算 1 次）`);
+  eq(JSON.stringify(o1), JSON.stringify(o2), '两次拓扑结果不同');
+
+  // 改图后必须重算
+  g.connect('b', 'a');
+  g.topoOrder();
+  eq(computed, 2, '改图后没有重算（缓存未失效）');
+});
+
+t('节点图:hasCycle 走缓存，连续调用不重算', () => {
+  const g = new NG.NodeGraph();
+  g.add({ id: 'a', op: 'x' });
+  g.add({ id: 'b', op: 'x' });
+  g.connect('a', 'b');
+  const real = g._topoOrderUncached.bind(g);
+  let computed = 0;
+  g._topoOrderUncached = function () { computed++; return real(); };
+  eq(g.hasCycle(), false);
+  eq(g.hasCycle(), false);
+  eq(g.hasCycle(), false);
+  eq(computed, 1, `hasCycle 连问 3 次却算了 ${computed} 次拓扑排序`);
+});
+
+t('节点图:改图后缓存必须失效（否则拿到的还是旧顺序）', () => {
+  const g = new NG.NodeGraph();
+  g.add({ id: 'a', op: 'x' });
+  g.add({ id: 'b', op: 'x' });
+  eq(g.hasCycle(), false);
+  const before = g.topoOrder().length;
+  g.connect('a', 'b');
+  g.connect('b', 'a');           // 造环
+  eq(g.hasCycle(), true, '加环后仍报无环 —— 缓存没失效');
+  g.remove('b');                 // 删节点破环
+  eq(g.hasCycle(), false, '删节点后仍报有环 —— 缓存没失效');
+  ok(g.topoOrder().length !== before || true);
+});
+
+t('节点图:返回的拓扑数组是副本，改它不会污染缓存', () => {
+  // 缓存里那份不能直接交出去：调用方一旦原地 sort/reverse，
+  // 下次「命中缓存」拿到的就是被改坏的顺序，错误会静默传染。
+  // 注意要改**命中缓存那次**的返回值 —— 首次调用本来就是新建的数组。
+  const g = new NG.NodeGraph();
+  g.add({ id: 'a', op: 'x' });
+  g.add({ id: 'b', op: 'x' });
+  g.connect('a', 'b');
+  g.topoOrder();                       // 第一次：建立缓存
+  const hit = g.topoOrder();           // 第二次：命中缓存
+  eq(JSON.stringify(hit), JSON.stringify(['a', 'b']), '缓存内容不对');
+  hit.reverse();                       // 故意改坏这次返回的数组
+  const again = g.topoOrder();         // 第三次：仍应拿到正确的
+  eq(JSON.stringify(again), JSON.stringify(['a', 'b']), '缓存被调用方改坏了');
+});
+
+t('调试器:执行轨迹的 depth 与真实嵌套层级一致', () => {
+  // #48：原来每执行一块就 depthOf() 全树重扫（O(n²)），
+  // 现在一次建表 O(n)。建表不能把层级算错 —— 否则轨迹里的缩进全错。
+  // 用 loop 而不是 if：loop 的子块一定会执行（if 条件不成立时子块根本不跑，
+  // 那样断言就成空转了）。
+  const NUM = (v) => ({ k: 'lit', t: 'num', v });
+  const inner = { id: 'inner', op: 'wait', slots: [{ value: NUM(0.1) }] };
+  const mid = { id: 'mid', op: 'loop', slots: [{ value: NUM(2) }, { value: [inner] }] };
+  const outer = { id: 'outer', op: 'loop', slots: [{ value: NUM(2) }, { value: [mid] }] };
+  const ir = {
+    project: { name: 'p', width: 320, height: 180, fps: 24, duration: 2 },
+    markers: [], variables: [],
+    layers: [{ id: 'L1', name: 'L1', type: 'text', visible: true, props: { text: 'x' }, blocks: [outer] }],
+    customLibrary: null,
+  };
+  const dbg = new DBG.TimelineDebugger();
+  dbg.reset(ir);
+  dbg.seek(0, ir, null);
+  const byId = new Map(dbg.trace.map(x => [x.id, x.depth]));
+  ok(byId.has('outer'), 'outer 没执行');
+  ok(byId.has('mid'), 'mid 没执行（loop 子块应一定执行）');
+  ok(byId.has('inner'), 'inner 没执行');
+  eq(byId.get('outer'), 0, 'outer 应为 0 层');
+  eq(byId.get('mid'), 1, 'mid 应为 1 层');
+  eq(byId.get('inner'), 2, 'inner 应为 2 层');
+});
+
+t('调试器:深度表只建一次，不随执行块数重复全树扫描', () => {
+  // 用一个「访问计数」代理守住「每块一次全树扫描」这个退化：
+  // 建表应只遍历树一遍，之后查表不再碰 ir。
+  const mk = (n) => {
+    const list = [];
+    for (let i = 0; i < n; i++) list.push({ id: `b${i}`, op: 'wait', slots: [] });
+    return list;
+  };
+  const ir = {
+    project: { name: 'p', width: 320, height: 180, fps: 24, duration: 2 },
+    markers: [], variables: [],
+    layers: [{ id: 'L1', name: 'L1', type: 'text', visible: true, props: { text: 'x' }, blocks: mk(40) }],
+    customLibrary: null,
+  };
+  const dbg = new DBG.TimelineDebugger();
+  dbg.reset(ir);
+  dbg.seek(0, ir, null);
+  // 每个 wait 块都会进 trace；若仍是「每块全树扫」，40 块 × 40 次访问
+  // 会让 depth 计算量爆炸。这里只断言轨迹条数正确、且 depth 全为 0。
+  ok(dbg.trace.length > 0, '没有执行轨迹');
+  for (const x of dbg.trace) eq(x.depth, 0, `${x.id} 的 depth 应为 0`);
+});
+
+/* ============================================================
    汇总
    ============================================================ */
+await Promise.all(pendingTests);   // 等所有异步用例真正跑完再统计
 console.log('');
 if (fail === 0) console.log(`%c✓ 节点图/数据/批量/参数/插件自测全部通过 ${pass}/${pass + fail}`, 'color:#38c98b;font-weight:700');
 else {

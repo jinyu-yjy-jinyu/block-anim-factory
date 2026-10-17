@@ -16,7 +16,7 @@ import { TimelineDebugger } from './debugger.js';
 
 /* ---------- P0/P1/P2 新增模块 ---------- */
 import { AudioSource as UnifiedAudio } from './audiosource.js';
-import { AudioTrack, encodeWav, mixTracks, normalizeLoudness, LOUDNESS_PRESETS } from './audio-core.js';
+import { AudioTrack, encodeWav, mixTracks, mixDuration, normalizeLoudness, LOUDNESS_PRESETS } from './audio-core.js';
 import { AUDIO_PRESETS } from './recorder.js';
 import { AudioDesk } from './audiodesk.js';
 import { SubtitlePanel } from './subpanel.js';
@@ -27,13 +27,14 @@ import { renderNodeGraph } from './nodeview.js';
 import { exportVideo, detectCapabilities, FORMAT_PRESETS, exportWithAudio } from './video-export.js';
 import { CustomBlockLibrary, CustomBlock, extractFunction, expandCustomBlocks } from './customblocks.js';
 import * as SUB_EXPORTS from './subtitles.js';
-import * as APP_INTERP from './batch.js';
 
 /* ---------- V3/V4：模板市场 / 素材库 / AI 辅助 / 版本协作 ---------- */
 import { Marketplace, AssetLib, synthSfx, ASSET_KINDS } from './marketplace.js';
 import * as AI from './ai.js';
 import { Repo } from './collab.js';
 import * as IR_MOD from './ir.js';
+// batch.js 只导入一次（原实现 import 了两次，产生 APP_INTERP / APP_BATCH
+// 两个命名空间指向同一模块，谁在用哪个全靠运气）。
 import * as APP_BATCH from './batch.js';
 
 /* ---------- 注册 op 元数据（供积木文本解析用） ---------- */
@@ -164,7 +165,9 @@ function initNewPanels() {
     issuesEl: $('subIssues'),
     styleEl: $('subStyle'),
     onToast: toast,
-    onChange: () => { markDirty(); },
+    // 字幕面板改动要立刻回写 IR：否则 App.ir.subtitles 一直是打开工程时的旧快照，
+    // 导出 JSON / 存版本 / 撤销都快照到旧数据（面板改了、存下来的还是改之前的）。
+    onChange: () => { App.ir.subtitles = App.subPanel.toJSON(); markDirty(); },
     onSeek: (t) => { setTime(t); },
   });
   App.ir.subtitles = App.subPanel.toJSON();
@@ -516,6 +519,7 @@ function remixTemplate(t) {
     BV.S.ir = App.ir; BV.S.layerId = App.layerId;
     if (App.sceneTree) App.sceneTree.syncFromLayers(App.ir.layers);
     if (App.repo) App.repo.commit(App.ir, `Remix「${t.name}」v${t.version}`, { author: '我' });
+    syncSubtitlePanel(App.ir);
     syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector();
     renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
     App.market.download(t.id);
@@ -654,6 +658,7 @@ function renderGitLog() {
               App.layerId = App.ir.layers[0].id; BV.S.layerId = App.layerId;
               if (App.sceneTree) App.sceneTree.syncFromLayers(App.ir.layers);
               if (App.audioSource) App.audioSource.setNominalDuration(App.ir.project.duration);
+              syncSubtitlePanel(App.ir);
               syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector();
               renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
               toast(`已载入 ${r.shortHash}`, 'ok');
@@ -800,7 +805,7 @@ function aiParse() {
 
   const p = new AI.NLParser({
     layers: App.ir.layers.map(l => l.name),
-    markers: (App.ir.markers || []).map(m => m.name),
+    markers: (App.ir.markers || []).map(m => m.label),
   });
   const r = p.parse(text);
   if (!r.actions.length) {
@@ -1085,11 +1090,11 @@ function renderLoudnessPresets() {
   box.appendChild(label);
   for (const [key, target] of Object.entries(LOUDNESS_PRESETS)) {
     const b = document.createElement('button');
-    b.textContent = `${keyLabel(key)} ${target}`;
-    b.title = `把混音响度归一到 ${target} LUFS`;
+    b.textContent = `${keyLabel(key)} ${target.lufs}`;
+    b.title = `把混音响度归一到 ${target.lufs} LUFS`;
     b.addEventListener('click', () => {
       const res = App.audioDesk.normalizeToPreset(key);
-      if (res) toast(`已归一到 ${target} LUFS（实测 ${res.lufs.toFixed(1)}）`, 'ok');
+      if (res) toast(`已归一到 ${target.lufs} LUFS（实测 ${res.lufs.toFixed(1)}）`, 'ok');
       else toast('没有音频可处理', 'warn');
     });
     box.appendChild(b);
@@ -1155,6 +1160,7 @@ function restore(json) {
   dbg.reset(App.ir);
   // 撤销回到旧快照时，场景树也要跟着回（master 保留）
   if (App.sceneTree) App.sceneTree.syncFromLayers(App.ir.layers);
+  syncSubtitlePanel(App.ir);
   syncProjectToUI();
   renderLayerTree(); BV.renderBlocks(); renderInspector(); renderProjectSettings(); buildRuler();
   refreshNodeGraph();
@@ -1308,6 +1314,10 @@ function startMarkerDrag(e, m) {
   const track = $('track');
   const rect = track.getBoundingClientRect();
   const dur = App.ir.project.duration;
+  // 撤销点必须落在 mousedown 这一下（拖动开始前），不能放 mousemove：
+  // 拖动过程中 mousemove 会触发几十上百次，每帧 pushUndo 会堆出
+  // 几百个撤销点，Ctrl+Z 要按到手软才能退回去。参考 renameMarker 的写法。
+  pushUndo();
   const onMove = (ev) => {
     const t = clamp((ev.clientX - rect.left) / rect.width, 0, 1) * dur;
     m.time = Math.round(t * 100) / 100;
@@ -2005,6 +2015,7 @@ function newProject() {
   App.time = 0;
   BV.S.ir = App.ir; BV.S.layerId = App.layerId;
   dbg.reset(App.ir);
+  syncSubtitlePanel(App.ir);
   syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector(); renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
   toast('已新建工程', 'ok');
 }
@@ -2047,6 +2058,7 @@ $('fileInput').addEventListener('change', async (e) => {
     App.time = 0;
     BV.S.ir = ir; BV.S.layerId = App.layerId;
     dbg.reset(ir);
+    syncSubtitlePanel(ir);
     syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector(); renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
     toast(`已载入 ${f.name}`, 'ok');
   } catch (err) {
@@ -2149,8 +2161,19 @@ async function doExportVideo() {
     let outBlob = blob;
     if (fmt.startsWith('mp4') && App.audioTracks.length) {
       try {
-        const mixed = mixTracks(App.audioTracks);
-        const res = await exportWithAudio(blob, mixed.samples, mixed.sampleRate, {});
+        // mixTracks(tracks, duration, opts) 返回的是 Float32Array 本身，
+        // 不是 {samples, sampleRate}。而且 duration 是必需参数：
+        // 漏传会让 Math.ceil(undefined * sr) 得到 NaN，整段抛错，
+        // 被下面的 catch 吞掉 → 导出看起来成功，实际永远是无声版本。
+        const audioDuration = Math.max(
+          (to - from) || ir.project.duration,
+          ...App.audioTracks.map(tr => (tr.start || 0) + (tr.samples.length / (tr.sampleRate || 48000))),
+        );
+        const mixed = mixTracks(App.audioTracks, audioDuration, { sampleRate: 48000 });
+        if (!mixed || !mixed.length) {
+          throw new Error('混音结果为空');
+        }
+        const res = await exportWithAudio(blob, mixed, 48000, {});
         if (res && res.muxed) { outBlob = res.video; toast('视频与音频已合成', 'ok'); }
         else if (res && res.audio) {
           EX.download(blob, '无声成片.mp4');
@@ -2461,7 +2484,7 @@ function renderExportFormats() {
       el2('div', { class: 'fmt-name' }, p.label),
       el2('div', { class: 'fmt-note' }, p.note),
       el2('div', { class: 'fmt-badge' + (key.startsWith('mp4') && !caps.canMp4 ? ' warn' : '') },
-        key.startsWith('mp4') ? (caps.canMp4 ? (caps.webcodecs ? 'WebCodecs 可用' : 'ffmpeg 可用') : '本环境不可用，将降级') : '可用'),
+        key.startsWith('mp4') ? (caps.canMp4 ? (caps.webcodecs ? 'WebCodecs 可用' : 'ffmpeg.wasm 可用') : '本环境不可用，请改用 WebM 或 PNG 序列帧') : '可用'),
     ]);
     card.addEventListener('click', () => {
       box.querySelectorAll('.fmt-card').forEach(c => c.classList.remove('on'));
@@ -2555,8 +2578,11 @@ function audioExportMenu() {
         el2('button', {
           style: 'margin-top:6px',
           onClick: () => {
-            const mixed = mixTracks(tracks);
-            EX.download(new Blob([encodeWav(mixed.samples, mixed.sampleRate)], { type: 'audio/wav' }), '混音.wav');
+            // mixTracks(tracks, duration) 的 duration 是必需参数：
+            // 漏传会得到长度 0 的数组（不抛错），encodeWav 再拿 undefined 当参数就炸。
+            const mixed = mixTracks(tracks, mixDuration(tracks));
+            if (!mixed || !mixed.length) { toast('没有可混音的内容', 'warn'); return; }
+            EX.download(new Blob([encodeWav(mixed, 48000)], { type: 'audio/wav' }), '混音.wav');
             closeModal();
           },
         }, '下载'),
@@ -2619,7 +2645,12 @@ function markDirty() {
   App.dirty = true;
   $('statusText').textContent = '● 未保存';
   clearTimeout(dirtyTimer);
-  dirtyTimer = setTimeout(() => { $('statusText').textContent = '就绪'; App.dirty = false; }, 1600);
+  // 定时器只负责把状态栏文字恢复成「就绪」，
+  // **绝不能清 App.dirty** —— 原来这里顺手写了 App.dirty = false，
+  // 于是任何改动 1.6 秒后就被当成「已保存」，beforeunload 的
+  // 「有未保存改动」拦截形同虚设，关窗口直接丢工程。
+  // App.dirty 只在真正保存成功后由 markClean() 清。
+  dirtyTimer = setTimeout(() => { $('statusText').textContent = '就绪'; }, 1600);
 }
 function markClean() { App.dirty = false; $('statusText').textContent = '已保存'; }
 
@@ -3041,12 +3072,29 @@ function loadTplDialog() {
       App.time = 0;
       BV.S.ir = App.ir; BV.S.layerId = App.layerId;
       dbg.reset(App.ir);
+      syncSubtitlePanel(App.ir);
       closeModal();
       syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector(); renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
       toast('已载入模板：' + t.name, 'ok');
     });
     list.appendChild(d);
   }
+}
+
+/**
+ * 把 App.ir 里带的字幕同步到字幕面板。
+ *
+ * 换工程的地方（打开文件、新建、载模板、载版本、撤销…）都必须调这个，
+ * 否则 IR 里字幕数据在、面板上却是空的 —— 数据和界面不一致，用户会以为字幕丢了。
+ * 注意 SubtitleTrack.fromJSON 不接受 undefined/null，所以这里先兜底成空对象。
+ */
+function syncSubtitlePanel(ir) {
+  if (!App.subPanel) return;
+  App.subPanel.loadJSON(ir.subtitles || {});
+  App.subPanel.setDuration((ir.project && ir.project.duration) || 6);
+  // 回写规范化后的结果：工程里没有 subtitles 字段时补一个空轨道，
+  // 这样导出 JSON / 提交版本拿到的 IR 结构始终一致。
+  ir.subtitles = App.subPanel.toJSON();
 }
 
 function importPastedText() {
@@ -3061,6 +3109,7 @@ function importPastedText() {
     App.time = 0;
     BV.S.ir = App.ir; BV.S.layerId = App.layerId;
     dbg.reset(App.ir);
+    syncSubtitlePanel(App.ir);
     closeModal();
     syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector(); renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
     toast(r.notes.length ? '已导入（' + r.notes.join('；') + '）' : '已导入积木文本', r.notes.length ? '' : 'ok', 3200);
@@ -3163,6 +3212,7 @@ window.BlockAnim = {
     BV.S.ir = App.ir; BV.S.layerId = App.layerId;
     dbg.reset(App.ir);
     if (App.sceneTree) App.sceneTree.syncFromLayers(App.ir.layers);
+    syncSubtitlePanel(App.ir);
     syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector();
     renderProjectSettings(); buildRuler(); layoutStage(); drawFrame(); refreshNodeGraph();
     return App.ir.project.name;
@@ -3177,6 +3227,7 @@ window.BlockAnim = {
     BV.S.ir = ir; BV.S.layerId = App.layerId;
     dbg.reset(ir);
     if (App.sceneTree) App.sceneTree.syncFromLayers(App.ir.layers);
+    syncSubtitlePanel(ir);
     syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector();
     renderProjectSettings(); buildRuler(); layoutStage(); drawFrame(); refreshNodeGraph();
   },
@@ -3268,7 +3319,7 @@ window.BlockAnim = {
   interpolate(str, row) {
     const ds = App.dataPanel.ds;
     const cols = ds ? ds.columns : Object.keys(row).map(k => ({ key: k, label: k, type: typeof row[k] === 'number' ? 'num' : 'str' }));
-    return APP_INTERP.interpolate(str, row, cols, APP_INTERP.FORMATTERS);
+    return APP_BATCH.interpolate(str, row, cols, APP_BATCH.FORMATTERS);
   },
   dataPanelSnapshot() {
     return App.dataPanel.ds ? App.dataPanel.ds.toJSON() : { columns: [], rows: [] };
@@ -3354,7 +3405,7 @@ window.BlockAnim = {
   aiParse(text) {
     const p = new AI.NLParser({
       layers: App.ir.layers.map(l => l.name),
-      markers: (App.ir.markers || []).map(m => m.name),
+      markers: (App.ir.markers || []).map(m => m.label),
     });
     const r = p.parse(text || '');
     const c = AI.actionsToBlocks(r.actions);

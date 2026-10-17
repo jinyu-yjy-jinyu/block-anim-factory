@@ -168,8 +168,9 @@ export class NLParser {
       case 'moveIn':
         slots.layer = this.layerOf(clause);
         slots.dir = SEL(pickDirection(clause));
-        slots.dx = NUM(directionX(clause));
-        slots.dy = NUM(directionY(clause));
+        // 「距离」槽要的是正值 —— evaluator 按 dir 自己定正负（left → dx = -dist），
+        // 传带符号的值会让「从左滑入」反向。
+        slots.dist = NUM(directionDist(clause));
         slots.dur = TIME(numOf(n => n.unit === '秒' || n.unit === 's', 0.7));
         slots.start = TIME(numOf(n => n.unit === '秒' && n.v > 0, 0));
         why.push(`从${slots.dir.v}滑入`);
@@ -177,9 +178,12 @@ export class NLParser {
 
       case 'scaleIn':
         slots.layer = this.layerOf(clause);
+        slots.from = NUM(numOf(n => n.v < 1 && n.unit === '', 0.8));
+        // 「到」槽要有值，否则它会被后面的参数顶掉；blocks.js 该积木的默认值就是 1
+        // （desc 也是「从 0 放大到 1」）。「放大到 1.2」这类目标倍率目前还认不出来。
+        slots.to = NUM(1);
         slots.dur = TIME(numOf(n => n.unit === '秒' || n.unit === 's', 0.6));
         slots.start = TIME(numOf(n => n.unit === '秒' && n.v > 0, 0));
-        slots.from = NUM(numOf(n => n.v < 1 && n.unit === '', 0.8));
         slots.anim = SEL(pickAnim(clause));
         why.push('缩放入场');
         break;
@@ -363,6 +367,16 @@ function directionY(clause) {
   const d = pickDirection(clause);
   return d === 'up' ? -80 : d === 'down' ? 80 : 0;
 }
+/**
+ * moveIn「距离」槽要的正值（= 位移的模）。
+ * 直接从 directionX/directionY 取绝对值，保证两者不会各改各的而漂开。
+ * 横向 120 / 纵向 80 是沿用既有的默认幅度。
+ */
+function directionDist(clause) {
+  const d = pickDirection(clause);
+  if (d === 'left' || d === 'right') return Math.abs(directionX(clause));
+  return Math.abs(directionY(clause));
+}
 function pickColor(clause) {
   const m = clause.match(/#[0-9a-fA-F]{6}|红|绿|蓝|黄|紫|粉|橙|青|白|黑/);
   if (!m) return null;
@@ -386,31 +400,64 @@ function extractData(clause) {
    动作序列 → 真正的积木（校验合法性）
    ============================================================ */
 
-/** 槽位名 → 积木槽位下标的映射（必须与 blocks.js 的 def.slots 对齐） */
+/**
+ * 槽位名 → 积木槽位下标的映射。
+ *
+ * 判据是 evaluator 实际怎么读：语句块一律按位置取 E(0)…E(n)，而 E(i) 就是
+ * blocks.js 的 def.slots[i]。所以「哪个名字排在第几位」不是风格问题 ——
+ * 错开一位，参数就会落进类型不符的槽里（时间槽拿到颜色、数字槽拿到布尔），
+ * 积木在界面上看着正常，跑起来全错。
+ *
+ * 数组里的 null = 这个槽没有对应的解析结果，交给 actionsToBlocks 用
+ * blocks.js 的默认值填。不要为了「填满」把别的参数硬塞进去。
+ */
 const SLOT_ORDER = {
   charPopIn: ['layer', 'start', 'gap', 'anim'],
-  stagger: ['layer', 'unit', 'gap', 'start'],
+  // stagger 的 def.slots 是 [图层, 单元间隔, 起始延迟]，没有「单位」槽；
+  // parser 产出的 unit 在这里被有意丢弃（evaluator 里 ensureUnits 固定按 char 走）。
+  stagger: ['layer', 'gap', 'start'],
   typewriter: ['layer', 'speed', 'start'],
   fadeIn: ['layer', 'dur', 'start'],
   fadeOut: ['layer', 'dur', 'start'],
-  moveIn: ['layer', 'dir', 'dx', 'dy', 'dur', 'start', 'anim'],
-  scaleIn: ['layer', 'from', 'dur', 'start', 'anim'],
+  // 「距离」是单值槽：evaluator 自己按 dir 算正负（dir=left → dx=-dist）。
+  // 这里必须给正的距离（parser 的 dist），传带符号的 dx 会让「从左滑入」反向。
+  moveIn: ['layer', 'dir', 'dist', 'dur', 'start', 'anim'],
+  scaleIn: ['layer', 'from', 'to', 'dur', 'start', 'anim'],
   maskWipe: ['layer', 'dur', 'start', 'dir'],
-  pathSweep: ['layer', 'dur', 'amp', 'cycles', 'start'],
+  // def.slots = [图层, 时长, 起始, 振幅]；parser 的 cycles 在这个积木里没有槽。
+  pathSweep: ['layer', 'dur', 'start', 'amp'],
+  // def.slots 有 5 个，parser 只给 4 个 → 第 5 槽（小数位）走默认值。
   numberRoll: ['layer', 'to', 'dur', 'start'],
-  highlightWord: ['layer', 'highlight', 'auto'],
-  audioBars: ['count', 'gain', 'source'],
-  ringSpectrum: ['bands', 'thickness', 'smooth'],
-  growBar: ['layer', 'data', 'perBar', 'start'],
+  // def.slots = [图层, 台词, 起始, 高亮色]。台词留空是有意的：evaluator 只在
+  // words 非空时才改写文本，留空 = 对图层现有文字逐词高亮。
+  // parser 的 highlight 是颜色 → 属于第 4 槽；auto 在这个积木里没有槽。
+  highlightWord: ['layer', null, null, 'highlight'],
+  // def.slots = [图层, 柱数, 起始, 颜色, 增益]，parser 的 source 没有槽。
+  audioBars: [null, 'count', null, null, 'gain'],
+  // def.slots = [图层, 环数, 起始, 颜色, 半径]；thickness/smooth 没有对应槽。
+  ringSpectrum: [null, 'bands', null, null, null],
+  // def.slots = [图层, 数据, 单根时长, 间隔, 起始, 颜色]
+  growBar: ['layer', 'data', 'perBar', null, 'start', null],
   drawLine: ['layer', 'data', 'perPoint', 'start'],
+  // ⚠ 未对齐，已上报：evaluator 从 E(0) 读图层、E(5) 读速度，而 blocks.js 的
+  // particles 只有 5 个槽、第 0 槽是「粒子数」——两边差一个图层槽，
+  // 光靠这张表补不回来（改 blocks.js 或 evaluator 才行，不在这批范围内）。
   particles: ['layer', 'count', 'speed', 'life'],
+  // ⚠ 同上：evaluator 的 repeater 按 [图层, 份数, 间距, 错峰间隔, 起始, 起始高度]
+  // 读 6 个位置，blocks.js 只有 5 个槽且第 0 槽是「份数」。
   repeater: ['layer', 'count', 'gap', 'axis'],
-  drawShape: ['layer', 'shape', 'fill', 'start'],
+  // def.slots = [图层, 填充, 宽, 高, 圆角]；shape/start 没有对应槽。
+  // 注：evaluator 里没有 drawShape 的 case，这个积木目前不会产生任何画面。
+  drawShape: ['layer', 'fill'],
   wait: ['dur'],
   setAt: ['at'],
   loop: ['count'],
   parallel: [],
   atMarker: ['marker'],
+  // setVar 是新加的「写变量」op，def.slots = [变量名(str), 值(num)]。
+  // parser 目前没有产出这个 op 的句式，但映射先对齐着：将来加了句式，
+  // 参数会按位置落进对的槽，不会重演 #19（错开一位、参数落进类型不符的槽）。
+  setVar: ['name', 'value'],
 };
 
 /**
@@ -668,7 +715,7 @@ export function explainBlock(b, ctx = {}) {
     case 'charPopIn':
       return `让「${v(0).v}」逐字弹入，从 ${t(1)} 开始，每个字间隔 ${v(2).v} 秒，用 ${v(3).v} 缓动`;
     case 'stagger':
-      return `把「${v(0).v}」按${unitName(v(1).v)}拆分，依次入场，单元间隔 ${v(2).v} 秒，从 ${t(3)} 开始`;
+      return `把「${v(0).v}」依次错峰入场，单元间隔 ${v(1).v} 秒，从 ${t(2)} 开始`;
     case 'typewriter':
       return `「${v(0).v}」以每秒 ${v(1).v} 字的速度打字机式显现，从 ${t(2)} 开始`;
     case 'fadeIn':
@@ -676,31 +723,31 @@ export function explainBlock(b, ctx = {}) {
     case 'fadeOut':
       return `「${v(0).v}」在 ${t(2)} 用 ${v(1).v} 秒淡出`;
     case 'moveIn':
-      return `「${v(0).v}」从${dirName(v(1).v)}方向偏移 (${v(2).v}, ${v(3).v}) 滑入，用 ${v(4).v} 秒`;
+      return `「${v(0).v}」从${dirName(v(1).v)}方向偏移 ${v(2).v} 滑入，用 ${v(3).v} 秒`;
     case 'scaleIn':
-      return `「${v(0).v}」从 ${v(1).v} 倍缩放到正常大小，用 ${v(2).v} 秒`;
+      return `「${v(0).v}」从 ${v(1).v} 倍缩放到 ${v(2).v} 倍，用 ${v(3).v} 秒`;
     case 'maskWipe':
       return `「${v(0).v}」用遮罩从${dirName(v(3).v)}擦出，用 ${v(1).v} 秒`;
     case 'pathSweep':
-      return `「${v(0).v}」沿波浪路径扫过，振幅 ${v(2).v}`;
+      return `「${v(0).v}」沿波浪路径扫过，用 ${v(1).v} 秒，振幅 ${v(3).v}`;
     case 'numberRoll':
       return `「${v(0).v}」的数字从 0 滚到 ${v(1).v}，用 ${v(2).v} 秒`;
     case 'highlightWord':
-      return `「${v(0).v}」做卡拉OK逐词高亮，高亮色 ${v(1).v}`;
+      return `「${v(0).v}」做卡拉OK逐词高亮，高亮色 ${v(3).v}`;
     case 'audioBars':
-      return `画 ${v(0).v} 根音频波形柱，跟着音量跳动`;
+      return `画 ${v(1).v} 根音频波形柱，跟着音量跳动`;
     case 'ringSpectrum':
-      return `画环形频谱，${v(0).v} 个频段，环宽 ${v(1).v}`;
+      return `画环形频谱，${v(1).v} 个频段，半径 ${v(4).v}`;
     case 'growBar':
       return `柱状图按数据「${v(1).v}」逐根生长，每根 ${v(2).v} 秒`;
     case 'drawLine':
-      return `折线图按数据「${v(1).v}」依次绘出，每个点 ${v(2).v} 秒`;
+      return `折线图按数据「${v(1).v}」依次绘出，整段 ${v(2).v} 秒`;
     case 'particles':
-      return `${v(1).v} 个粒子的粒子系统，速度 ${v(2).v}，寿命 ${v(3).v} 秒`;
+      return `${v(0).v} 个粒子的粒子系统，速度 ${v(4).v}，寿命 ${v(2).v} 秒`;
     case 'repeater':
-      return `把「${v(0).v}」复制 ${v(1).v} 份，间隔 ${v(2).v} 秒沿${axisName(v(3).v)}排列`;
+      return `复制 ${v(0).v} 份，水平间距 ${v(1).v}，错峰间隔 ${v(2).v} 秒`;
     case 'drawShape':
-      return `绘制一个${shapeName(v(1).v)}，填充 ${v(2).v}`;
+      return `在「${v(0).v}」上绘制图元，填充 ${v(1).v}`;
     case 'wait':
       return `等待 ${v(0).v} 秒`;
     case 'setAt':

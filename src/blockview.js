@@ -439,6 +439,7 @@ function startDrag(payload, ev) {
   const onMove = (e) => {
     const dx = e.clientX - sx, dy = e.clientY - sy;
     if (!moved && Math.hypot(dx, dy) < 4) return;
+    if (!moved) captureDropzones();   // 首次真正拖动时取一次快照
     moved = true;
     ghost.style.transform = `translate(${dx}px,${dy}px) rotate(1.5deg)`;
     highlightDrop(e);
@@ -448,6 +449,7 @@ function startDrag(payload, ev) {
     document.removeEventListener('mouseup', onUp);
     ghost.remove();
     clearHighlights();
+    releaseDropzones();
     if (!moved) {
       const id = payload.kind === 'move' ? payload.id : null;
       S.selected = id;
@@ -473,6 +475,21 @@ function highlightDrop(e) {
   const dz = pickDrop(e);
   if (dz) dz.classList.add('over');
 }
+
+/* 拖拽中的 dropzone 快照。
+   原实现每次 mousemove 都 `document.querySelectorAll('.dropzone')`，
+   然后对**每一个** dropzone 调 getBoundingClientRect() 并读 offset 类属性 ——
+   这会在每帧强制浏览器同步重排（layout thrashing）。积木多时拖动明显卡。
+   改成拖拽开始那一刻取一次列表，拖拽过程中只做几何判断，不再触发重排。
+   列表在拖拽期间基本不会变（拖动本身不改 DOM 结构，drop 之后才改）。 */
+let _dragDropzones = null;
+
+function captureDropzones() {
+  _dragDropzones = [...document.querySelectorAll('.dropzone')];
+  return _dragDropzones;
+}
+function releaseDropzones() { _dragDropzones = null; }
+
 function clearHighlights() {
   for (const n of document.querySelectorAll('.dropzone.over')) n.classList.remove('over');
 }
@@ -484,8 +501,9 @@ function pickDrop(e) {
     const z = n.querySelector && n.querySelector(':scope > .dropzone');
     if (z) return z;
   }
-  // 兜底：找最近的垂直 dropzone
-  const all = [...document.querySelectorAll('.dropzone')];
+  // 兜底：找最近的垂直 dropzone。
+  // 有拖拽快照就用快照（不查 DOM），否则才现取一次。
+  const all = _dragDropzones || [...document.querySelectorAll('.dropzone')];
   if (!all.length) return null;
   return all.find(z => {
     const r = z.getBoundingClientRect();

@@ -201,10 +201,15 @@ export async function blobToTrack(blob, opts = {}) {
     // WebM/Opus 交给浏览器解码
     const AC = window.AudioContext || window.webkitAudioContext;
     const ctx = new AC();
-    const audio = await ctx.decodeAudioData(buf);
-    samples = audio.getChannelData(0).slice();
-    rate = audio.sampleRate;
-    ctx.close();
+    try {
+      const audio = await ctx.decodeAudioData(buf);
+      samples = audio.getChannelData(0).slice();
+      rate = audio.sampleRate;
+    } finally {
+      // 解码失败时也必须关闭，否则 AudioContext 泄漏，
+      // 系统里的音频/麦克风占用一直不释放（指示灯常亮）。
+      ctx.close();
+    }
   }
   if (rate !== targetRate) samples = resample(samples, rate, targetRate);
   const t = new AudioTrack({ name: opts.name || '录音', kind: opts.kind || 'voice', sampleRate: targetRate, samples });
@@ -291,7 +296,11 @@ export class WaveEditor {
     out.set(this.track.samples.subarray(i), i + clip.length);
     this.track.setSamples(out, this.track.sampleRate);
     this.markEnd += clip.length / this.track.sampleRate;
-    return this._push({ type: 'paste', at, len: clip.length / this.track.sampleRate });
+    // 必须把真正贴进去的样本存进操作栈。原来只存了长度 len，撤销时
+    // _restoreFromOps 用 _clipByLen(len) 造一段全零数组贴回去 ——
+    // 撤销一次粘贴，贴入的内容变成等长静音，原音频永久丢失。
+    // consume=0：整段插入，没有消耗原有样本。
+    return this._push({ type: 'paste', at, len: clip.length / this.track.sampleRate, consume: 0, block: clip.slice() });
   }
 
   /** 交叉淡化：与 clip 拼接，重叠 crossfade 秒 */
@@ -310,7 +319,9 @@ export class WaveEditor {
     }
     out.set(clip.subarray(f), base + f);
     this.track.setSamples(out, sr);
-    return this._push({ type: 'paste', at, len: (clip.length - f) / sr, fade: crossfade });
+    // 同 paste：必须存真正贴进去的样本，否则撤销会把这段换成等长静音。
+    // 存的是淡化前的原始 clip，重放时用同样的 fade 重算一遍，结果一致。
+    return this._push({ type: 'paste', at, len: (clip.length - f) / sr, fade: crossfade, consume: f, block: clip.slice() });
   }
 
   copyRange() {
@@ -349,7 +360,12 @@ export class WaveEditor {
     this.track.setSamples(backup.slice(a, b), sr);
     this.markStart = 0;
     this.markEnd = this.track.duration;
-    return this._push({ type: 'delete', t0: 0, t1: this.track.duration + 1, dur: 0, _trim: true });
+    // 裁剪必须记成自己的操作类型并带上裁剪区间。
+    // 原来借用 delete（{type:'delete', t0:0, t1:duration+1}）记账，而 undo 里
+    // delete 走 _restoreFromOps 重放：重放这条伪 delete 会把整轨清空 ——
+    // 裁剪后一按撤销，音频全没了。_restoreFromOps 也无法从伪 delete 反推
+    // 原本裁掉了哪一段（它只存了「删到哪」，没存「留哪儿」）。
+    return this._push({ type: 'trim', t0, t1 });
   }
 
   /** 归一化到目标峰值（dBFS） */
@@ -449,7 +465,7 @@ export class WaveEditor {
         // 预设是原地改样本 → 直接整段还原
         this.track.setSamples(op.backup, this.track.sampleRate);
         break;
-      case 'delete': case 'paste': case 'split': case 'stretch':
+      case 'delete': case 'paste': case 'split': case 'stretch': case 'trim':
         // 这几类是结构性变更，直接整体还原到操作前更稳妥
         this._restoreFromOps();
         break;
@@ -474,12 +490,20 @@ export class WaveEditor {
           break;
         }
         case 'delete': this.delete(op.t0, op.t1); break;
-        case 'paste': this.paste(this._clipByLen(op.len), op.at); break;
+        case 'trim': this.trimTo(op.t0, op.t1); break;
+        case 'paste':
+          // 用操作里存的真实样本重放。旧代码走 _clipByLen(len) 造全零数组，
+          // 重放出来的是一段静音 —— 这是「撤销粘贴后原音频变静音」的根因。
+          // 老版操作记录没有 block 字段（内存里没有历史数据，无需兼容），
+          // 万一遇到就跳过，不静默贴一段零。
+          if (!op.block) break;
+          if (op.fade) this.pasteWithFade(op.block, op.at, op.fade);
+          else this.paste(op.block, op.at);
+          break;
         case 'stretch': this.stretchRange(op.t0, op.t1, op.ratio); break;
       }
     }
   }
-  _clipByLen(len) { return new Float32Array(Math.round(len * this.track.sampleRate)); }
 
   /** 重算分析（编辑后调用） */
   reanalyze() {

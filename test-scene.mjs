@@ -11,9 +11,17 @@ const IR = await import(U('src/ir.js'));
 const HC = await import(U('src/headless-canvas.mjs'));
 
 let pass = 0, fail = 0; const failures = [];
+// 异步用例必须被等待：原实现把 f() 返回的 Promise 直接当成「非 false」计为通过，
+// 于是 async 用例里的断言从未执行也会记为通过。
+const pendingTests = [];
 const t = (n, f) => {
-  try { const r = f(); if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; }
-  catch (e) { fail++; failures.push(`${n} → ${e.message}`); }
+  const good = (r) => { if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; };
+  const bad = (e) => { fail++; failures.push(`${n} → ${e.message}`); };
+  try {
+    const r = f();
+    if (r && typeof r.then === 'function') { pendingTests.push(r.then(good, bad)); return; }
+    good(r);
+  } catch (e) { bad(e); }
 };
 const eq = (a, b, m) => { if (String(a) !== String(b)) throw new Error(`${m || ''} 期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`); };
 const near = (a, b, e, m) => { if (!(Math.abs(a - b) <= (e == null ? 1e-6 : e))) throw new Error(`${m || ''} 期望 ≈${b}，实际 ${a}`); };
@@ -90,6 +98,28 @@ t('字幕:ASS 逐词高亮标记往返', () => {
   eq(back.cues[0].words.length, 2, '词数');
   eq(back.cues[0].words[0].word, '你');
   near(back.cues[0].words[1].end - back.cues[0].words[1].start, 0.3, 0.05);
+  // 回归：解析 \\k 高亮时正文被重复拼接（"你好" → "你你好好"）。
+  // 原实现把 last 只推进到 \\k 标签之后，循环结束后那句
+  // `plain += body.slice(last)` 又把同一个词补了一遍。
+  eq(back.cues[0].text, '你好', '逐词高亮正文被重复');
+});
+t('字幕:ASS 少字段 Dialgoue 行不该丢', () => {
+  // 回归：parseASS 硬编码 `m.length < 10 → continue`，字段更少（很多工具
+  // 导出时不带 Effect 列）的合法 Dialogue 行会被整条丢掉 —— 用户导入
+  // 字幕看到的是空轨道。要读 [Events] 的 Format: 行决定字段布局。
+  const head = '[Script Info]\nTitle: t\n\n[Events]\n';
+  const nine = 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Text\n'
+    + 'Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,你好，世界\n';
+  const back = SUB.parseASS(head + nine);
+  eq(back.cues.length, 1, '9 字段行被丢弃');
+  eq(back.cues[0].text, '你好，世界', '台词里的逗号被吃');
+  // 没有 Format 行时也要能读出来（退到「Text 是最后一列」）
+  const noFmt = 'Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,无格式行\n';
+  eq(SUB.parseASS(head + noFmt).cues.length, 1, '无 Format 行的 9 字段 Dialogue 被丢弃');
+  // 标准 10 字段 + 台词含逗号（这条本来就过，保住不回归）
+  const std = 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
+    + 'Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,你好，世界，再见\n';
+  eq(SUB.parseASS(head + std).cues[0].text, '你好，世界，再见');
 });
 t('字幕:自动识别格式', () => {
   ok(SUB.importSubtitles('WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi').cues.length === 1, 'VTT');
@@ -523,6 +553,7 @@ t('表达式:格式化分派', () => {
 /* ============================================================
    汇总
    ============================================================ */
+await Promise.all(pendingTests);   // 等所有异步用例真正跑完再统计
 console.log('');
 if (fail === 0) console.log(`%c✓ 字幕/场景树/文字引擎自测全部通过 ${pass}/${pass + fail}`, 'color:#38c98b;font-weight:700');
 else {

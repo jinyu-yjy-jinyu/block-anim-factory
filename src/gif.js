@@ -56,7 +56,7 @@ function lzwEncode(indices, minCodeSize) {
     if (next < 4096) {
       dict.set(key, next);
       next++;
-      if (next > (1 << codeSize)) {
+      if (next === (1 << codeSize)) {
         if (codeSize < 12) codeSize++;
         else {
           // 字典满：发 clear 并重置
@@ -160,6 +160,14 @@ function diffFrame(prev, cur, w, h) {
    frames: [{ rgba: Uint8ClampedArray(w*h*4), delay: cs }]
    w, h, loop, quality
    返回 Blob(GIF)
+
+   内存：原实现把三份数据同时驻留 ——
+     ① frames 里每帧的完整 RGBA（调用方持有，w*h*4 字节/帧）
+     ② indexed 再存一份调色板索引（w*h 字节/帧）
+     ③ chunks 是 number[]，每个字节占 8 字节（V8 SMI）
+   640x360 × 120 帧实测峰值 3.90x 输入 RGBA。
+   现在：索引仍要逐帧留着（差分编码需要「上一帧」的索引），
+   但输出字节改成边算边写进 Uint8Array，不再用 number[] 累积。
    ============================================================ */
 export function encodeGIF(frames, w, h, opts = {}) {
   const { loop = 0, dither = true } = opts;
@@ -180,7 +188,7 @@ export function encodeGIF(frames, w, h, opts = {}) {
   const pal = buildPalette(samples);
   const nearest = makeMatcher(pal);
 
-  // 2) 逐帧量化为调色板索引
+  // 2) 逐帧量化为调色板索引（只保留索引，不再保留 RGBA 的副本）
   const indexed = frames.map(f => {
     const out = new Uint8Array(w * h);
     const d = f.rgba;
@@ -201,15 +209,21 @@ export function encodeGIF(frames, w, h, opts = {}) {
     return { indices: out };
   });
 
-  // 3) 写 GIF 字节流
-  const chunks = [];
-  const push = (arr) => { for (let i = 0; i < arr.length; i++) chunks.push(arr[i] & 0xff); };
+  // 3) 写 GIF 字节流。
+  //    原实现用 number[] 累积再 new Uint8Array(chunks) —— 输出每个字节
+  //    在数组里占 8 字节，1080p 级 GIF 输出十几 MB 时这一项就是几百 MB。
+  //    改成可增长的 Uint8Array，追加时只扩容量，不再 8 倍膨胀。
+  const out = new ByteWriter(1 << 16);
+  const push = (arr) => out.push(arr);
 
   // Header "GIF89a"
   push([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
   // Logical Screen Descriptor：全局调色板 256 色，色深 8 位
   push([w & 0xff, (w >> 8) & 0xff, h & 0xff, (h >> 8) & 0xff]);
-  push([0x80 | ((8 - 1) << 4), 0x00, 0x00]);
+  // packed 低 3 位 = GCT size，2^(N+1) 条。实际写了 256 条 → 必须是 7（2^8）。
+  // 原先算成 0（=2 条），解码器会按 2 色调色板解析，后面 254 条全部错位。
+  // 另有：GCT 标志位(bit7)=1，色彩分辨率(bit6-4)=7，排序位(bit3)=0。
+  push([0x80 | (0x07 << 4) | 0x07, 0x00, 0x00]);
   // Global Color Table
   for (const c of pal) push([c[0], c[1], c[2]]);
 
@@ -246,7 +260,154 @@ export function encodeGIF(frames, w, h, opts = {}) {
 
   // Trailer
   push([0x3b]);
-  return new Blob([new Uint8Array(chunks)], { type: 'image/gif' });
+  return new Blob([out.finish()], { type: 'image/gif' });
+}
+
+/* ============================================================
+   encodeGIFFromSource — 流式入口（给导出通道用）
+
+   为什么要这个：encodeGIF(frames, ...) 要求调用方把所有帧的完整
+   RGBA 一次性交出来。640x360 × 120 帧就是 105MB，1080p 更离谱；
+   而调用方（exportGif）本来是**边渲染边**拿帧的，为了喂 encodeGIF
+   不得不把每帧的 Uint8ClampedArray 全攒在数组里 —— 那才是 OOM 的主因。
+
+   这里改成两遍渲染：
+     第一遍：渲染每帧、只做稀疏采样，凑出全局调色板（不保留像素）
+     第二遍：重新渲染每帧、量化、立即写进 GIF 字节流，只保留上一帧索引
+   代价是渲染两遍（渲染是纯函数、无副作用，重复渲染结果一致），
+   换来常驻内存从 O(帧数 × 宽高 × 4) 降到 O(宽高)。
+
+   @param {{total:number, fps:number, delayFor:(i:number)=>number,
+            draw:(i:number, canvas:any)=>any, canvas:any,
+            getRGBA:()=>Uint8ClampedArray, w:number, h:number}} source
+   @returns {Promise<Blob>}
+   ============================================================ */
+export async function encodeGIFFromSource(source, w, h, opts = {}) {
+  const { loop = 0, dither = true, onProgress = null, shouldCancel = null } = opts;
+  const total = source.total;
+  if (!total) throw new Error('没有可编码的帧');
+  const delayFor = source.delayFor || (() => 5);
+
+  const samples = [];
+  const step = Math.max(1, Math.round(Math.sqrt((total * w * h) / 40000)));
+
+  // ---- 第一遍：采样颜色 ----
+  for (let i = 0; i < total; i++) {
+    if (shouldCancel && shouldCancel()) throw new Error('已取消');
+    source.draw(i);
+    const d = source.getRGBA();
+    for (let y = 0; y < h; y += step) {
+      for (let x = 0; x < w; x += step) {
+        const p = (y * w + x) * 4;
+        samples.push([d[p], d[p + 1], d[p + 2]]);
+      }
+    }
+    if (onProgress) onProgress(0.35 * (i + 1) / total, `采样 ${i + 1}/${total}`);
+    if (i % 8 === 7) await new Promise(r => setTimeout(r, 0));
+  }
+  const pal = buildPalette(samples);
+  const nearest = makeMatcher(pal);
+
+  // ---- 写头 ----
+  const out = new ByteWriter(1 << 16);
+  const push = (arr) => out.push(arr);
+  push([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]);
+  push([w & 0xff, (w >> 8) & 0xff, h & 0xff, (h >> 8) & 0xff]);
+  push([0x80 | (0x07 << 4) | 0x07, 0x00, 0x00]);
+  for (const c of pal) push([c[0], c[1], c[2]]);
+  push([0x21, 0xff, 0x0b]);
+  push([0x4e, 0x45, 0x54, 0x53, 0x43, 0x41, 0x50, 0x45, 0x32, 0x2e, 0x30]);
+  push([0x03, 0x01, loop & 0xff, (loop >> 8) & 0xff, 0x00]);
+
+  // ---- 第二遍：逐帧量化 + 立即写盘 ----
+  let prev = null;
+  const indices = new Uint8Array(w * h);
+  for (let i = 0; i < total; i++) {
+    if (shouldCancel && shouldCancel()) throw new Error('已取消');
+    source.draw(i);
+    const d = source.getRGBA();
+    quantizeInto(indices, d, w, h, nearest, dither);
+
+    const delayCs = Math.max(2, Math.round(delayFor(i)));
+    let minX = 0, minY = 0, fw = w, fh = h;
+    if (prev) {
+      const dd = diffFrame(prev, indices, w, h);
+      if (dd.maxX < 0) {
+        writeFrameBlock(push, 0, 0, 1, 1, [0], delayCs, true);
+        if (onProgress) onProgress(0.35 + 0.65 * (i + 1) / total, `编码 ${i + 1}/${total}`);
+        continue;
+      }
+      minX = dd.minX; minY = dd.minY; fw = dd.maxX - minX + 1; fh = dd.maxY - minY + 1;
+    }
+    const sub = new Uint8Array(fw * fh);
+    for (let y = 0; y < fh; y++) {
+      const src = (y + minY) * w + minX;
+      sub.set(indices.subarray(src, src + fw), y * fw);
+    }
+    writeFrameBlock(push, minX, minY, fw, fh, sub, delayCs, false);
+
+    // 只留上一帧索引：diffFrame 需要它，其余帧用完即弃
+    if (!prev) prev = new Uint8Array(w * h);
+    prev.set(indices);
+
+    if (onProgress) onProgress(0.35 + 0.65 * (i + 1) / total, `编码 ${i + 1}/${total}`);
+    if (i % 8 === 7) await new Promise(r => setTimeout(r, 0));
+  }
+
+  push([0x3b]);
+  return new Blob([out.finish()], { type: 'image/gif' });
+}
+
+/** 把一帧 RGBA 量化进 out（复用同一个 Uint8Array，不再每帧新分配） */
+function quantizeInto(out, d, w, h, nearest, dither) {
+  if (dither) {
+    for (let i = 0, j = 0; i < out.length; i++, j += 4) {
+      const x = i % w, y = (i / w) | 0;
+      const bayer = BAYER4[y & 3][x & 3];
+      const off = (bayer / 16 - 0.5) * 14;
+      out[i] = nearest(
+        Math.max(0, Math.min(255, d[j] + off)),
+        Math.max(0, Math.min(255, d[j + 1] + off)),
+        Math.max(0, Math.min(255, d[j + 2] + off)),
+      );
+    }
+  } else {
+    for (let i = 0, j = 0; i < out.length; i++, j += 4) {
+      out[i] = nearest(d[j], d[j + 1], d[j + 2]);
+    }
+  }
+}
+
+/* 可增长字节缓冲。
+   原实现用 number[] 存每个输出字节：V8 里一个小整数在普通数组里占 8 字节，
+   所以「GIF 输出 12MB」实际要 96MB 才能装下，而且中途还会因为数组扩容
+   再翻一次倍。这里用 Uint8Array + 倍增扩容，容量翻倍时只拷一次。 */
+class ByteWriter {
+  constructor(initial = 1 << 16) {
+    this.buf = new Uint8Array(initial);
+    this.len = 0;
+  }
+  _ensure(n) {
+    const need = this.len + n;
+    if (need <= this.buf.length) return;
+    let cap = this.buf.length || 1;
+    while (cap < need) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(this.buf.subarray(0, this.len));
+    this.buf = next;
+  }
+  push(arr) {
+    this._ensure(arr.length);
+    this.buf.set(arr, this.len);
+    this.len += arr.length;
+  }
+  byte(b) {
+    this._ensure(1);
+    this.buf[this.len++] = b & 0xff;
+  }
+  finish() {
+    return this.buf.subarray(0, this.len);
+  }
 }
 
 function writeFrameBlock(push, x, y, w, h, indices, delayCs, transparent) {

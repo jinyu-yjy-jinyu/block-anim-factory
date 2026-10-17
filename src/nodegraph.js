@@ -29,15 +29,25 @@ export class NodeGraph {
     this.nodes = opts.nodes || [];
     this.edges = opts.edges || [];
     this.groups = opts.groups || [];
+    // 拓扑结果缓存。hasCycle() 原本每次都完整跑一遍 Kahn，
+    // 而渲染/校验会连续问好几次「有环吗」—— 图不变就重复算。
+    // 用 _rev 当失效标记：任何改动 nodes/edges 的操作都 ++。
+    this._rev = 0;
+    this._topoRev = -1;
+    this._topoCache = null;
   }
+
+  /** 图结构变了就调用，让拓扑缓存失效 */
+  _touch() { this._rev++; }
 
   node(id) { return this.nodes.find(n => n.id === id); }
   edge(id) { return this.edges.find(e => e.id === id); }
 
-  add(node) { this.nodes.push(node); return node; }
+  add(node) { this.nodes.push(node); this._touch(); return node; }
   remove(id) {
     this.nodes = this.nodes.filter(n => n.id !== id);
     this.edges = this.edges.filter(e => e.from !== id && e.to !== id);
+    this._touch();
   }
   connect(from, to, opts = {}) {
     const e = {
@@ -47,6 +57,7 @@ export class NodeGraph {
       kind: opts.kind || 'data',      // data | flow
     };
     this.edges.push(e);
+    this._touch();
     return e;
   }
   incoming(id, port) {
@@ -58,6 +69,16 @@ export class NodeGraph {
 
   /** 拓扑排序（处理数据边；有环则返回 null） */
   topoOrder() {
+    if (this._topoRev === this._rev) return this._topoCache ? this._topoCache.slice() : null;
+    const result = this._topoOrderUncached();
+    this._topoRev = this._rev;
+    this._topoCache = result;
+    // 返回副本：缓存里那份不能交给调用方去改，否则下一次「命中缓存」
+    // 拿到的就是被改坏的顺序，错误会静默传染到所有后续调用。
+    return result ? result.slice() : null;
+  }
+
+  _topoOrderUncached() {
     const indeg = new Map(this.nodes.map(n => [n.id, 0]));
     const adj = new Map(this.nodes.map(n => [n.id, []]));
     for (const e of this.edges) {
@@ -79,6 +100,7 @@ export class NodeGraph {
     return out.length === this.nodes.length ? out : null;
   }
 
+  /** 有环吗（走缓存；图没变时不再重跑拓扑排序） */
   hasCycle() { return this.topoOrder() === null; }
 
   toJSON() {

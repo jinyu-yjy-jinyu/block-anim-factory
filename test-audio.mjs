@@ -6,11 +6,20 @@ const U = (p) => pathToFileURL(resolve(dirname(fileURLToPath(import.meta.url)), 
 
 const A = await import(U('src/audio-core.js'));
 const R = await import(U('src/recorder.js'));
+const AD = await import(U('src/audiodesk.js'));
 
 let pass = 0, fail = 0; const failures = [];
+// 异步用例必须被等待：原实现把 fn() 返回的 Promise 直接当成「非 false」计为通过，
+// 于是 async 用例里的断言从未执行也会记为通过。
+const pendingTests = [];
 const t = (name, fn) => {
-  try { const r = fn(); if (r === false) { fail++; failures.push(`${name} → 断言失败`); } else pass++; }
-  catch (e) { fail++; failures.push(`${name} → ${e.message}`); }
+  const good = (r) => { if (r === false) { fail++; failures.push(`${name} → 断言失败`); } else pass++; };
+  const bad = (e) => { fail++; failures.push(`${name} → ${e.message}`); };
+  try {
+    const r = fn();
+    if (r && typeof r.then === 'function') { pendingTests.push(r.then(good, bad)); return; }
+    good(r);
+  } catch (e) { bad(e); }
 };
 const eq = (a, b, m) => { if (String(a) !== String(b)) throw new Error(`${m || ''} 期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`); };
 const near = (a, b, e, m) => { if (!(Math.abs(a - b) <= (e == null ? 1e-6 : e))) throw new Error(`${m || ''} 期望 ≈${b}，实际 ${a}`); };
@@ -456,6 +465,68 @@ t('编辑:全静音输入不崩', () => {
   ok(r.removed > 0);
   ok(tr.duration <= 0.2, `残留 ${tr.duration}`);
 });
+t('编辑:裁剪后可撤销且不丢音频', () => {
+  // 回归：trimTo 原实现借用 delete 记账（{type:'delete', t0:0, t1:duration+1}），
+  // undo 里 delete 走 _restoreFromOps 重放，重放这条伪 delete 会把整轨清空 ——
+  // 裁剪后一按撤销，音频全没了。
+  const tr = makeSpeech(2);
+  const ed = new R.WaveEditor(tr);
+  const before = tr.duration;
+  ed.trimTo(0.5, 1.5);
+  near(tr.duration, 1, 0.01, '裁剪未生效');
+  ed.undo();
+  near(tr.duration, before, 0.001, '撤销裁剪未还原长度');
+  let peak = 0;
+  for (const v of tr.samples) peak = Math.max(peak, Math.abs(v));
+  ok(peak > 0.1, `撤销裁剪后音频为空，峰值仅 ${peak}`);
+});
+t('编辑:裁剪后继续编辑再撤销，音频不丢', () => {
+  // 回归：裁剪之后的所有结构性操作都会触发 _restoreFromOps 从 original 重放，
+  // 伪 delete 在这一步同样会把整轨清空。
+  const tr = makeSpeech(2);
+  const ed = new R.WaveEditor(tr);
+  ed.trimTo(0.5, 1.5);
+  const afterTrim = tr.duration;
+  ed.delete(0, 0.1);
+  ed.undo();                       // 只撤销这次 delete
+  near(tr.duration, afterTrim, 0.01, '撤销 delete 时把 trim 结果也弄丢了');
+  let peak = 0;
+  for (const v of tr.samples) peak = Math.max(peak, Math.abs(v));
+  ok(peak > 0.1, `音频被清空，峰值仅 ${peak}`);
+});
+t('编辑:撤销粘贴不把内容换成静音', () => {
+  // 回归：paste 的 op 只存了长度，_restoreFromOps 用 _clipByLen(len) 造一段
+  // 全零数组贴回去 → 撤销一次粘贴，贴入的内容变成等长静音，原音频不可恢复。
+  const tr = makeSpeech(3);
+  const ed = new R.WaveEditor(tr);
+  const clip = tr.slice(1.0, 2.0);
+  let clipPeak = 0;
+  for (const v of clip) clipPeak = Math.max(clipPeak, Math.abs(v));
+  ok(clipPeak > 0.1, '测试素材本身的片段就是静音');
+  ed.paste(clip, 0.3);
+  const at = Math.floor(0.35 * SR);
+  const afterPaste = tr.samples[at];
+  ed.delete(0, 0.05);              // 触发结构重放
+  ed.undo();
+  near(tr.samples[at], afterPaste, 1e-6, '重放后粘贴的样本变了');
+  let pastedPeak = 0;
+  for (let i = Math.floor(0.3 * SR); i < Math.floor(1.2 * SR); i++) pastedPeak = Math.max(pastedPeak, Math.abs(tr.samples[i]));
+  ok(pastedPeak > 0.1, `粘贴内容被换成静音，峰值仅 ${pastedPeak}`);
+});
+t('编辑:撤销淡化粘贴不把内容换成静音', () => {
+  const tr = makeSpeech(3);
+  const ed = new R.WaveEditor(tr);
+  const clip = tr.slice(1.0, 2.0);
+  ed.pasteWithFade(clip, 0.5, 0.05);
+  const at = Math.floor(1.2 * SR);
+  const before = tr.samples[at];
+  ed.delete(0, 0.05);
+  ed.undo();
+  near(tr.samples[at], before, 1e-6, '重放后样本变了');
+  let peak = 0;
+  for (let i = Math.floor(1.0 * SR); i < Math.floor(1.5 * SR); i++) peak = Math.max(peak, Math.abs(tr.samples[i]));
+  ok(peak > 0.1, `淡化粘贴内容被换成静音，峰值仅 ${peak}`);
+});
 
 /* ---------- 时间拉伸 ---------- */
 t('变速:变慢后时长变长', () => {
@@ -517,7 +588,162 @@ t('预设:降噪不产生 NaN', () => {
   ok(tr.samples.every(v => isFinite(v)));
 });
 
+/* ---------- 回归：第一批修复的缺陷 ---------- */
+/* 这些用例的判据必须比「长度对」「不抛错」更严，
+   否则同一个 bug 会静默复发（频谱全零、混音全空都能骗过宽松断言）。 */
+
+/** 手工拼一个指定 format/bits 的 WAV，用于验证解码分支 */
+function makeWav(format, bits, channels, sampleRate, samples) {
+  const bytesPer = bits / 8;
+  const n = samples.length;
+  const dataLen = n * bytesPer * channels;
+  const buf = new ArrayBuffer(44 + dataLen);
+  const dv = new DataView(buf);
+  const str = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); dv.setUint32(4, 36 + dataLen, true); str(8, 'WAVE');
+  str(12, 'fmt '); dv.setUint32(16, 16, true);
+  dv.setUint16(20, format, true);
+  dv.setUint16(22, channels, true);
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, sampleRate * channels * bytesPer, true);
+  dv.setUint16(32, channels * bytesPer, true);
+  dv.setUint16(34, bits, true);
+  str(36, 'data'); dv.setUint32(40, dataLen, true);
+  for (let i = 0; i < n; i++) {
+    const off = 44 + i * bytesPer;
+    if (format === 3) dv.setFloat32(off, samples[i], true);
+    else if (bits === 16) dv.setInt16(off, Math.round(samples[i] * 32767), true);
+    else if (bits === 24) {
+      const v = Math.round(samples[i] * 0x7fffff) & 0xffffff;
+      dv.setUint8(off, v & 0xff); dv.setUint8(off + 1, (v >> 8) & 0xff); dv.setUint8(off + 2, (v >> 16) & 0xff);
+    } else if (bits === 32) dv.setInt32(off, Math.round(samples[i] * 0x7fffffff), true);
+  }
+  return { buf, dataOffset: 44, bytesPer };
+}
+const RAMP = new Float32Array([-0.75, -0.25, 0, 0.25, 0.75]);
+
+t('WAV:24bit 能解出真实样本（不是静默全零）', () => {
+  const { buf } = makeWav(1, 24, 1, SR, RAMP);
+  const d = A.decodeWav(buf);
+  eq(d.samples.length, RAMP.length);
+  let maxErr = 0;
+  for (let i = 0; i < RAMP.length; i++) maxErr = Math.max(maxErr, Math.abs(d.samples[i] - RAMP[i]));
+  ok(maxErr <= 1 / 0x7fffff + 1e-9, `24bit 量化误差 ${maxErr} 过大`);
+  ok(d.samples.some(v => v > 0.1), '24bit 解出来全零 —— 走了没有对应分支的 else 链');
+  ok(d.samples.some(v => v < -0.1), '24bit 负样本丢失（符号扩展错了）');
+});
+t('WAV:32bit 浮点被当浮点解（不是当 int32）', () => {
+  const { buf } = makeWav(3, 32, 1, SR, RAMP);
+  const d = A.decodeWav(buf);
+  for (let i = 0; i < RAMP.length; i++) near(d.samples[i], RAMP[i], 1e-6, `样本 ${i}`);
+});
+t('WAV:16bit 回归', () => {
+  const { buf } = makeWav(1, 16, 1, SR, RAMP);
+  const d = A.decodeWav(buf);
+  for (let i = 0; i < RAMP.length; i++) near(d.samples[i], RAMP[i], 1 / 32767 + 1e-9, `样本 ${i}`);
+});
+
+t('混音:漏传 duration 不返回空数组（按轨道推算）', () => {
+  const a = new A.AudioTrack({ samples: new Float32Array(SR).fill(0.3), sampleRate: SR });
+  const m = A.mixTracks([a]);
+  ok(m.length > 0, '漏传 duration 得到长度 0 的数组');
+  near(m.length, SR, 3, `长度 ${m.length}`);
+  near(m[100], 0.3, 1e-6);
+});
+t('混音:mixDuration 取起点+长度的最大值', () => {
+  const a = new A.AudioTrack({ samples: new Float32Array(SR), sampleRate: SR });
+  const b = new A.AudioTrack({ samples: new Float32Array(SR), sampleRate: SR });
+  b.start = 2;
+  near(A.mixDuration([a, b]), 3, 1e-6);
+  near(A.mixDuration([]), 0, 1e-6);
+});
+t('响度:短音频早退分支也带 truePeakDb', () => {
+  const m = A.measureLoudness(new Float32Array(10), SR);
+  eq(m.lufs, -70);
+  ok('truePeakDb' in m, '早退分支缺 truePeakDb，返回形状不一致');
+});
+
+/* ---------- 回归：一键达标必须真的改变导出结果 ---------- */
+/* 原来 normalizeToPreset 只返回一份算好的副本，没人用它 ——
+   用户看到「已归一到 −14 LUFS」的提示，导出链（main.js 读 App.audioTracks
+   重新混音）拿到的却还是原始音量的轨道。比崩溃更隐蔽：静默地说谎。
+   下面验「轨道样本真的变了」「能撤销」「报的是导出会得到的响度」。 */
+const toneTrack = (sec, amp, kind = 'voice', freq = 220) => {
+  const n = Math.round(sec * SR);
+  const s = new Float32Array(n);
+  for (let i = 0; i < n; i++) s[i] = Math.sin(i / SR * 2 * Math.PI * freq) * amp;
+  return new A.AudioTrack({ samples: s, sampleRate: SR, kind });
+};
+
+t('归一:轨道样本被真正修改（不再只返回副本）', () => {
+  const tr = toneTrack(1, 0.02);
+  const orig = tr.samples.slice();
+  const desk = new AD.AudioDesk({});
+  desk.setTracks([tr]);
+  const res = desk.normalizeToPreset('douyin');
+  ok(res, '应返回结果');
+  let changed = 0;
+  for (let i = 0; i < orig.length; i++) if (Math.abs(tr.samples[i] - orig[i]) > 1e-9) changed++;
+  ok(changed > orig.length * 0.9, `轨道样本几乎没变（${changed}/${orig.length}）——归一没落到轨道上`);
+  // 导出读的就是轨道，所以混音后的响度必须真的接近目标
+  const mixed = A.mixTracks([tr], A.mixDuration([tr]));
+  near(A.measureLoudness(mixed, SR).lufs, -14, 0.01, '归一后的混音响度');
+});
+
+t('归一:返回值报告的响度就是导出会得到的', () => {
+  const tr = toneTrack(1, 0.02);
+  const desk = new AD.AudioDesk({});
+  desk.setTracks([tr]);
+  const res = desk.normalizeToPreset('douyin');
+  const mixed = A.mixTracks([tr], A.mixDuration([tr]));
+  near(res.lufs, A.measureLoudness(mixed, SR).lufs, 0.01, '报告值与实际混音不一致');
+  ok(res.before < res.lufs, `原始 ${res.before} 应低于归一后 ${res.lufs}`);
+});
+
+t('归一:可以撤销回原始样本', () => {
+  const tr = toneTrack(1, 0.02);
+  const orig = tr.samples.slice();
+  const desk = new AD.AudioDesk({});
+  desk.setTracks([tr]);
+  desk.normalizeToPreset('douyin');
+  eq(desk.editor.ops.length, 1, '操作数');
+  eq(desk.editor.ops[0].type, 'gain', '栈顶类型应为 gain（undo 按 backup 还原）');
+  desk.editor.undo();
+  let diff = 0;
+  for (let i = 0; i < orig.length; i++) diff = Math.max(diff, Math.abs(tr.samples[i] - orig[i]));
+  eq(diff, 0, '撤销后样本未完全还原');
+});
+
+t('归一:多条轨道各自乘 gain（否则下次混音输入还是老的）', () => {
+  const v = toneTrack(1, 0.02, 'voice', 220);
+  const m = toneTrack(1, 0.03, 'music', 330);
+  const mb = A.measureLoudness(m.samples, SR).lufs;
+  const desk = new AD.AudioDesk({});
+  desk.setTracks([v, m]);
+  const res = desk.normalizeToPreset('douyin');
+  eq(res.tracks, 2, '参与归一的轨道数');
+  ok(A.measureLoudness(m.samples, SR).lufs > mb + 3, 'music 轨道没被抬升');
+  eq(v.editor.ops.length, 1, 'voice 的编辑器栈');
+  eq(m.editor.ops.length, 1, 'music 的编辑器栈');
+});
+
+t('归一:静音/空轨道/无效预设名都不动手', () => {
+  const silent = new A.AudioTrack({ samples: new Float32Array(SR), sampleRate: SR });
+  const d1 = new AD.AudioDesk({});
+  d1.setTracks([silent]);
+  eq(d1.normalizeToPreset('douyin'), null, '全静音应返回 null');
+  eq(d1.editor.ops.length, 0, '全静音不该污染撤销栈');
+  const d2 = new AD.AudioDesk({});
+  d2.setTracks([]);
+  eq(d2.normalizeToPreset('douyin'), null, '空轨道应返回 null');
+  const d3 = new AD.AudioDesk({});
+  d3.setTracks([toneTrack(1, 0.02)]);
+  eq(d3.normalizeToPreset('不存在的预设'), null, '无效预设名应返回 null');
+  eq(d3.editor.ops.length, 0, '无效预设名不该改轨道');
+});
+
 /* ---------- 汇总 ---------- */
+await Promise.all(pendingTests);   // 等所有异步用例真正跑完再统计
 console.log('');
 if (fail === 0) console.log(`%c✓ 音频内核自测全部通过 ${pass}/${pass + fail}`, 'color:#38c98b;font-weight:700');
 else {

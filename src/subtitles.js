@@ -334,16 +334,43 @@ export function parseASS(text, name = '字幕') {
   const t = new SubtitleTrack({ name });
   const lines = text.split('\n');
   let inEvents = false;
+  // 字段布局要读 [Events] 段的 Format: 行，不能硬编码。
+  // 硬编码 `m.length < 10 → continue` 会把合法但字段更少的行整条丢掉：
+  // 少 Effect 字段（9 段，很多工具这样导出）的 Dialogue 至今解析出 0 条，
+  // 用户导入字幕看到的是空轨道。Text 永远是最后一列，且台词里可以有逗号，
+  // 所以还要按 Format 里 Text 的位置决定从哪里开始重新拼接。
+  let fields = null;
   for (const line of lines) {
-    if (/^\[Events\]/i.test(line)) { inEvents = true; continue; }
+    if (/^\[Events\]/i.test(line)) { inEvents = true; fields = null; continue; }
     if (/^\[/.test(line)) { inEvents = false; continue; }
     if (!inEvents) continue;
+    const fm = line.match(/^Format:\s*(.+)$/i);
+    if (fm) {
+      const cols = fm[1].split(',').map(s => s.trim());
+      if (cols.length) fields = cols;
+      continue;
+    }
     if (!/^Dialogue:/i.test(line)) continue;
     const m = line.replace(/^Dialogue:\s*/i, '').split(',');
-    if (m.length < 10) continue;
-    const start = parseTime(m[1]), end = parseTime(m[2]);
+    let textIdx, sIdx = 1, eIdx = 2;
+    if (fields) {
+      const fi = (re) => fields.findIndex(f => re.test(f));
+      sIdx = fi(/^Start$/i); eIdx = fi(/^End$/i);
+      textIdx = fi(/^Text$/i);
+      // Format 行缺列时的兜底：Text 永远是最后一列，Start/End 是经典的第 2/3 列
+      if (sIdx < 0) sIdx = 1;
+      if (eIdx < 0) eIdx = 2;
+      if (textIdx < 0) textIdx = m.length - 1;
+    } else {
+      // 没有 Format 行：按 ASS 默认 10 列。字段数不足 10（少 Effect 等）时
+      // 退到「Text 是最后一列」；满 10 列以上仍按第 10 列起，否则台词里的
+      // 逗号会把后半句切到 Text 列之前。
+      textIdx = m.length >= 10 ? 9 : m.length - 1;
+    }
+    if (m.length < 4 || textIdx < 3 || sIdx >= m.length || eIdx >= m.length) continue;
+    const start = parseTime(m[sIdx]), end = parseTime(m[eIdx]);
     if (start == null || end == null) continue;
-    let body = m.slice(9).join(',').trim();
+    let body = m.slice(textIdx).join(',').trim();
     // 去 ASS 覆写码，还原为纯文本
     const words = [];
     let cursor = start;
@@ -356,8 +383,11 @@ export function parseASS(text, name = '字幕') {
       const w = body.slice(km.index + km[0].length).split(/\{/)[0];
       words.push({ word: w, start: cursor, end: cursor + dur });
       cursor += dur;
-      last = km.index + km[0].length;
       plain += w;
+      // 已消费到「词尾」。原实现只推进到 \k 标签之后，于是循环结束后那句
+      // `plain += body.slice(last)` 又把同一个词补了一遍 —— 逐词高亮的字幕
+      // 解析出来每个词都出现两次（"逐词" → "逐逐词词"），正文被写坏。
+      last = km.index + km[0].length + w.length;
     }
     plain += body.slice(last).replace(/\{\\[^}]*\}/g, '');
     const [main, sub] = plain.split('\\N');

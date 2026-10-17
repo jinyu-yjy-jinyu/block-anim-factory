@@ -17,7 +17,8 @@
 
 import { clone, uid, validate } from './ir.js';
 import { ParamSet, ParamSpec, applyParams } from './batch.js';
-import { expandCustomBlocks, CustomBlockLibrary } from './customblocks.js';
+import { expandCustomBlocks, CustomBlockLibrary, CustomBlock } from './customblocks.js';
+import { hash01 } from './evaluator.js';
 
 /* ============================================================
    模板
@@ -114,12 +115,14 @@ export class Template {
       }
     }
     if (this.customBlocks && this.customBlocks.length) {
+      // 原实现是 `const { CustomBlock } = { CustomBlock: null }` —— 解构的是
+      // 刚造出来的空对象，CustomBlock 恒为 null，那两行只是让「这里好像用了
+      // CustomBlock」看起来成立。真正的后果是模板里的自定义积木以**裸对象**
+      // 进了库，而 CustomBlockLibrary 的 toBlockDefs() 要读 b.params.length、
+      // toJSON() 要调 b.toJSON() —— 裸对象没有这些，用到就炸。
+      // 现在按 CustomBlock.fromJSON 还原成实例。
       out.customLibrary = new CustomBlockLibrary({
-        blocks: this.customBlocks.map(b => {
-          const { CustomBlock } = { CustomBlock: null };
-          void CustomBlock;
-          return b;
-        }),
+        blocks: this.customBlocks.map(b => (b instanceof CustomBlock ? b : CustomBlock.fromJSON(b))),
       });
     }
     out.templateInfo = {
@@ -467,7 +470,11 @@ export function synthSfx(spec, sampleRate = 48000) {
         v = Math.sin(2 * Math.PI * (320 + 900 * p) * t) * Math.exp(-p * 9);
         break;
       case 'click':
-        v = (Math.random() * 2 - 1) * Math.exp(-p * 40) * 0.7;
+        // 噪声源用确定性 hash01(i)，不用 Math.random()：
+        // 同一素材每次合成必须得到同一段 PCM，否则「可复现导出」
+        // 这条产品声明就是假的（同一工程导两次，音效波形不同）。
+        // 幅度、包络公式保持原样，只换随机源。
+        v = (hash01(i) * 2 - 1) * Math.exp(-p * 40) * 0.7;
         break;
       case 'ding':
         v = (Math.sin(2 * Math.PI * (spec.freq || 880) * t)
@@ -479,9 +486,10 @@ export function synthSfx(spec, sampleRate = 48000) {
         break;
       }
       case 'noise-sweep': {
-        // 白噪 + 带通包络，做出「掠过去」的感觉
+        // 白噪 + 带通包络，做出「掠过去」的感觉。
+        // 同样换成确定性噪声源（hash01 按样本序号），幅度/包络不变。
         const env = Math.sin(Math.PI * p) ** 1.5;
-        v = (Math.random() * 2 - 1) * env * 0.35;
+        v = (hash01(i * 1.618033988749895) * 2 - 1) * env * 0.35;
         break;
       }
       default:

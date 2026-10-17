@@ -14,6 +14,25 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+
+/* 浏览器定位：优先 CHROME_PATH（由 test-all.mjs 传入），
+   其次 playwright 自带的 chromium（CI 上 npx playwright install chromium 装的就是它），
+   最后退到系统安装。写死 Windows 路径的话 ubuntu runner 上必然启动失败。 */
+function resolveChrome() {
+  const env = process.env.CHROME_PATH;
+  if (env && existsSync(env)) return env;
+  try { const p = chromium.executablePath(); if (p && existsSync(p)) return p; } catch { /* 继续找 */ }
+  const la = process.env.LOCALAPPDATA, pf = process.env.PROGRAMFILES;
+  const cands = process.platform === 'win32'
+    ? [la && join(la, 'Google\\Chrome\\Application\\chrome.exe'), pf && join(pf, 'Google\\Chrome\\Application\\chrome.exe'), pf && join(pf, 'Microsoft\\Edge\\Application\\msedge.exe')]
+    : process.platform === 'darwin'
+      ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+      : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium'];
+  const found = cands.filter(Boolean).find(p => existsSync(p));
+  if (!found) throw new Error('未找到可用的浏览器，请运行 npx playwright install chromium');
+  return found;
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
@@ -28,22 +47,45 @@ const srv = createServer(async (q, s) => {
 });
 await new Promise(r => srv.listen(0, '127.0.0.1', r));
 
-const browser = await chromium.launch({ executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless: true });
+const browser = await chromium.launch({ executablePath: resolveChrome(), headless: true });
 const page = await (await browser.newContext({ viewport: { width: 1680, height: 1000 } })).newPage();
 const errs = [];
 page.on('pageerror', e => errs.push(e.message));
 await page.goto('http://127.0.0.1:' + srv.address().port + '/', { waitUntil: 'load' });
-await page.waitForTimeout(1000);
+// 等应用真正 boot 完，而不是死等固定时长
+await page.waitForFunction(() => window.BlockAnim && window.BlockAnim.ready, null, { timeout: 30000 })
+  .catch(async () => { await page.waitForTimeout(1000); });   // 没有 ready 标记就退回等一会儿
 
 let fail = 0;
 const ok = (c, m, x = '') => { console.log(`  ${c ? 'OK  ' : 'FAIL'} ${m}${x ? '  → ' + x : ''}`); if (!c) fail++; };
 
-/* 载入模板并跳到指定时间 */
+/* 载入模板并跳到指定时间。
+   不用固定 waitForTimeout：慢机器上 250ms 不够（假失败），
+   快机器上又是白等，而且等待时长和实际渲染完成没有必然关系。
+   改成等「画布内容确实发生变化」这个真实信号。 */
+async function waitForRepaint(page, prevSig) {
+  // 画布每一帧都在动，所以不能用「内容稳定」判断；
+  // 改成等 requestAnimationFrame 连续跑过若干帧 —— 一帧绘制完成即代表
+  // 布局、样式、字体都已就绪，这正是固定 sleep 想赌的东西。
+  await page.evaluate(() => new Promise(resolve => {
+    let n = 0;
+    const tick = () => (++n >= 3 ? resolve() : requestAnimationFrame(tick));
+    requestAnimationFrame(tick);
+  }));
+  return page.evaluate(() => {
+    const c = document.getElementById('stage');
+    const d = c.getContext('2d').getImageData(0, 0, Math.min(c.width, 64), Math.min(c.height, 64)).data;
+    let s = 0;
+    for (let i = 0; i < d.length; i += 4) s = (s * 31 + d[i] + d[i + 1] * 3 + d[i + 2] * 7) >>> 0;
+    return s;
+  });
+}
+
 async function load(key, time) {
   await page.evaluate((k) => window.BlockAnim.loadTemplate(k), key);
-  await page.waitForTimeout(250);
+  await waitForRepaint(page);
   await page.evaluate((t) => window.BlockAnim.setTime(t), time);
-  await page.waitForTimeout(250);
+  await waitForRepaint(page);
 }
 
 /* 读画布像素做区域统计 */

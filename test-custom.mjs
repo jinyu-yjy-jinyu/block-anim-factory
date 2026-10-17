@@ -8,9 +8,17 @@ const CB = await import(U('src/customblocks.js'));
 const IR = await import(U('src/ir.js'));
 
 let pass = 0, fail = 0; const failures = [];
+// 异步用例必须被等待：原实现把 f() 返回的 Promise 直接当成「非 false」计为通过，
+// 于是 async 用例里的断言从未执行也会记为通过。
+const pendingTests = [];
 const t = (n, f) => {
-  try { const r = f(); if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; }
-  catch (e) { fail++; failures.push(`${n} → ${e.message}`); }
+  const good = (r) => { if (r === false) { fail++; failures.push(`${n} → 断言失败`); } else pass++; };
+  const bad = (e) => { fail++; failures.push(`${n} → ${e.message}`); };
+  try {
+    const r = f();
+    if (r && typeof r.then === 'function') { pendingTests.push(r.then(good, bad)); return; }
+    good(r);
+  } catch (e) { bad(e); }
 };
 const eq = (a, b, m) => { if (String(a) !== String(b)) throw new Error(`${m || ''} 期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}`); };
 const near = (a, b, e, m) => { if (!(Math.abs(a - b) <= (e == null ? 1e-6 : e))) throw new Error(`${m || ''} 期望 ≈${b}，实际 ${a}`); };
@@ -273,6 +281,48 @@ t('自定义积木:表达式型（无数组槽）', () => {
   const r = CB.expandCustomBlocks([call], lib);
   ok(r.blocks.length >= 0);
 });
+t('自定义积木:表达式实参不被 String 成 [object Object]', () => {
+  // 回归：subValue 对非 lit 的实参一律走 STR(a)，而 STR 是 String(v)，
+  // 于是实参是表达式积木（{k:'blk'}）时被写成 "[object Object]" 字符串，
+  // 参数在求值之前就被毁掉了。
+  const cb = new CB.CustomBlock({
+    name: '取大', op: 'custom.max',
+    params: [
+      { name: 'x', label: '值', type: 'num', defaultValue: IR.NUM(1) },
+      { name: 'k', label: '倍数', type: 'num', defaultValue: IR.NUM(2) },
+    ],
+    body: [{ id: 'tb', k: 'N', op: 'mul', a: { k: 'lit', t: 'str', v: '{x}' }, b: { k: 'lit', t: 'str', v: '{k}' } }],
+  });
+  const lib = new CB.CustomBlockLibrary({ blocks: [cb] });
+  const exprArg = { k: 'blk', op: 'add', a: IR.NUM(3), b: IR.NUM(4) };
+  const r = CB.expandCustomBlocks([{ k: 'N', op: 'custom.max', a: exprArg, b: IR.NUM(2) }], lib);
+  const got = JSON.stringify(r.blocks[0].a);
+  ok(!got.includes('[object Object]'), `表达式实参被字符串化：${got}`);
+  eq(r.blocks[0].a.k, 'blk', '表达式实参应原样代入');
+  eq(r.blocks[0].a.op, 'add');
+});
+t('自定义积木:文本内嵌占位也会被替换', () => {
+  // 回归：原实现只处理「整串就是单个 {x}」的占位，写在句子中间的
+  // `时长={dur}s` 从不替换 —— 形参在面板上配了却不起作用，且不报错。
+  const cb = new CB.CustomBlock({
+    name: '标签', op: 'custom.tag',
+    params: [{ name: 'x', type: 'num', defaultValue: IR.NUM(1) }],
+    body: [{ id: 'tb', k: 'N', op: 'setText', a: { k: 'lit', t: 'str', v: '值={x}!' } }],
+  });
+  const lib = new CB.CustomBlockLibrary({ blocks: [cb] });
+  const r = CB.expandCustomBlocks([{ k: 'N', op: 'custom.tag', a: IR.NUM(7) }], lib);
+  eq(r.blocks[0].a.v, '值=7!', '文本内嵌占位未替换');
+  // 带单位的 time 字段同理
+  const cb2 = new CB.CustomBlock({
+    name: '时长标签', op: 'custom.tl',
+    params: [{ name: 'dur', type: 'time', defaultValue: IR.TIME(0.5) }],
+    body: [{ id: 'tb', k: 'N', op: 'setText', a: { k: 'lit', t: 'time', v: '{dur}' } }],
+  });
+  const lib2 = new CB.CustomBlockLibrary({ blocks: [cb2] });
+  const r2 = CB.expandCustomBlocks([{ k: 'N', op: 'custom.tl', a: IR.TIME(1.2) }], lib2);
+  eq(r2.blocks[0].a.v, 1.2, '形参未代入');
+  eq(r2.blocks[0].a.t, 'time', '类型应保留');
+});
 t('自定义积木:slugify', () => {
   eq(CB.slugify('Hello World'), 'Hello_World');
   eq(CB.slugify('fade-in'), 'fadein');
@@ -284,6 +334,7 @@ t('自定义积木:slugify', () => {
 /* ============================================================
    汇总
    ============================================================ */
+await Promise.all(pendingTests);   // 等所有异步用例真正跑完再统计
 console.log('');
 if (fail === 0) console.log(`%c✓ 自定义积木自测全部通过 ${pass}/${pass + fail}`, 'color:#38c98b;font-weight:700');
 else {
