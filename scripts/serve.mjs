@@ -10,7 +10,20 @@ import { extname, join, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = Number(process.env.PORT) || 5173;
+
+/* 端口解析。原写法是 `Number(process.env.PORT) || 5173`，
+   而 `Number('0') || 5173` 里 0 被当成「无值」回退成 5173 —— 于是
+   注释许诺的「PORT=0 让系统分配空闲端口」从未成立（实测传 PORT=0
+   仍然监听 5173）。这里改成显式判空，并顺带堵两个坑：
+     · PORT=''   → 不能当成 0（CI 里空变量很常见）
+     · PORT='  ' → Number('  ') 是 0，会被误当成「随机端口」
+     · PORT='abc' → NaN，直接传给 listen 会抛错
+   只有 0~65535 的整数才采用，其余一律回退 5173。 */
+const rawPort = process.env.PORT;
+const parsedPort = rawPort !== undefined && rawPort.trim() !== '' ? Number(rawPort) : NaN;
+const PORT = Number.isInteger(parsedPort) && parsedPort >= 0 && parsedPort <= 65535
+  ? parsedPort
+  : 5173;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
