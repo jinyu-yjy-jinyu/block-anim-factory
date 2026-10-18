@@ -56,8 +56,14 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; OutputDir 是相对 .iss 文件所在目录（不是当前工作目录），
 ; 所以这里显式写 ..\ 让安装包落在项目根目录，
 ; 和 zip 产物（block-anim-factory-win-x64.zip）放在一起，CI 里统一按根目录取。
+; 文件名刻意用纯 ASCII：
+;   actions/upload-artifact 在收集文件时用的是 CI 里 path 的通配符，
+;   而中文通配符会让它丢掉文件名前半截（实测产出 `-0.4.1-win-x64-setup.exe`，
+;   「积木动画工厂」整段消失）。改成 ASCII 后两边都能稳定匹配。
+;   注意：这只影响**下载下来的文件名**；安装后用户看到的
+;   开始菜单项 / 桌面图标 / 卸载列表 / 向导里的程序名全部来自 AppName（中文），不受影响。
 OutputDir=..
-OutputBaseFilename=积木动画工厂-{#AppVersion}-win-x64-setup
+OutputBaseFilename=block-anim-factory-{#AppVersion}-win-x64-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

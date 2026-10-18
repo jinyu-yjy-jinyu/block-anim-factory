@@ -164,15 +164,17 @@ jobs:
           if (-not (Test-Path $src)) { Write-Host "::error::缺少 $src"; exit 1 }
           iscc $src /Q
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::iscc 失败（$LASTEXITCODE）"; exit $LASTEXITCODE }
-          $setup = Get-ChildItem '积木动画工厂-*-setup.exe' | Select-Object -First 1
+          $setup = Get-ChildItem 'block-anim-factory-*-setup.exe' | Select-Object -First 1
           if (-not $setup) { Write-Host '::error::没生成安装包'; exit 1 }
           Write-Host "安装包: $($setup.Name)  $([math]::Round($setup.Length/1MB,1)) MB"
 
       - name: 上传安装包
         uses: actions/upload-artifact@v4
         with:
-          name: 积木动画工厂-安装包
-          path: 积木动画工厂-*-setup.exe
+          # artifact 名与 path 都用 ASCII：中文 path 通配符会让 upload-artifact
+          # 丢掉文件名前缀（实测过，产出一个以 "-" 开头的文件）。
+          name: block-anim-factory-installer
+          path: block-anim-factory-*-setup.exe
           retention-days: 30
           if-no-files-found: error
 
@@ -233,7 +235,7 @@ jobs:
       - name: 下载安装包
         uses: actions/download-artifact@v4
         with:
-          name: 积木动画工厂-安装包
+          name: block-anim-factory-installer
           path: dist
 
       - name: 挂到已有的发行版（没有就跳过）
