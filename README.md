@@ -70,6 +70,45 @@ npm run desktop:test    # 跑桌面版冒烟测试
 
 GitHub Actions 会在每次推 main 时自动构建 EXE 并上传产物；推 `v*` 标签时发布正式发行版。
 
+### Electron 桌面壳（开发中）
+
+WPF 壳只能跑 Windows；为了将来覆盖 macOS，还有一套 Electron 壳（`desktop-electron/`），
+与 WPF 壳共用同一份 Web 应用，界面与功能完全一致。
+
+| | WPF 壳（`desktop/`） | Electron 壳（`desktop-electron/`） |
+|---|---|---|
+| 平台 | 仅 Windows | Windows / macOS（计划） |
+| 自带运行时 | .NET 8 自包含（约 140 MB） | Electron（体积相近） |
+| 本地服务 | C# 裸 `TcpListener` | Node `http`，与网页版共用同一份实现 |
+| 状态 | 已发布（安装版 + 便携版） | 开发中：未接线 CI、未随 Release 发布 |
+
+核心文件：
+
+```
+desktop-electron/
+  main.js       主进程：单实例锁 → 起服务（port 0，系统分配）→ 建窗口 → 失败显示可读错误页 → 退出关服务
+  preload.js    contextBridge 白名单：isDesktop / platform / saveAs（大文件走系统保存对话框）
+  server.mjs    本地静态服务实现（scripts/serve.mjs 与它共用同一份）
+  smoke.mjs     云端无头冒烟：app 就绪 / 服务 / 页面加载 / VideoEncoder 真编码一帧 / asar 路径下目录穿越被挡
+  test-*.mjs    安全测试：目录穿越、双重编码、asar 虚拟路径边界
+  package.json
+```
+
+安全基线：`nodeIntegration: false` + `contextIsolation: true`，页面拿不到 `require` / `process` / `fs`；
+静态服务只监听回环地址，原始路径里的 `..` 与 `%2e%2e` 这类编码变形一律拒绝；
+404 保持纯文本（不吞成 HTML，避免把「文件不存在」伪装成「JSON 解析失败」）。
+
+本地运行（需要先在 `desktop-electron/` 里安装 electron）：
+
+```bash
+cd desktop-electron
+npm i
+npm start              # 起 Electron 窗口
+npm run test:server    # 跑服务安全测试
+```
+
+> 这套壳仍在施工：状态与待办见「工程侧现状」一节。
+
 ### 5 分钟上手
 
 1. 打开后默认载入「逐字弹入标题」模板，按 **空格** 播放。
@@ -314,7 +353,7 @@ src/
   main.js                   应用装配：UI、事件、撤销栈、导出调度、BlockAnim API
   headless-canvas.mjs       Node 下的 Canvas2D 记录桩（让渲染管线可测）
 scripts/
-  serve.mjs                 本地开发服务器
+  serve.mjs                 本地开发服务器（服务实现在 desktop-electron/server.mjs，网页版与 Electron 版共用）
   test-all.mjs              一键跑完全部测试（带超时保护）
 run-tests.mjs               套件 1：纯逻辑自测
 test-audio.mjs              套件 2：音频内核
@@ -336,6 +375,14 @@ desktop/BlockAnim.cs        释放资源 → 起本地静态服务 → 加载 We
 desktop/App.xaml(.cs)       入口与全局异常兜底
 desktop/MainWindow.xaml     窗口与启动占位
 desktop/SmokeTest.cs        冒烟测试（--smoke，不开窗口）
+desktop/installer.iss       Inno Setup 安装包脚本（安装包文件名用纯 ASCII）
+
+  # —— Electron 桌面壳（开发中）——
+desktop-electron/main.js      Electron 主进程：起服务 → 建窗口 → 失败显示可读错误页
+desktop-electron/preload.js   contextBridge 白名单：isDesktop / platform / saveAs
+desktop-electron/server.mjs   本地静态服务实现（网页版与 Electron 版共用）
+desktop-electron/smoke.mjs    云端无头冒烟（CI 用）
+desktop-electron/test-*.mjs   安全测试：目录穿越 / 双重编码 / asar 虚拟路径
 ```
 
 ★ = 核心。
@@ -477,9 +524,50 @@ await BlockAnim.batchRender(
 - **Lottie / 交互式 HTML 导出**：规划里列了，没做。
 - **macOS / Linux 桌面版**：只做了 Windows。WebView2 是 Windows 专有的，
   另外两个平台要换成 WKWebView / WebKitGTK，是另一套壳的工程量。
+  Electron 壳（`desktop-electron/`）就是为跨平台准备的另一条路线，目前在开发中。
 
 规划里「明确不做的清单」同样被尊重：不碰多轨剪辑与调色、不做专业混音、不做 3D、
 不追 Scratch 式趣味、不做移动端。音频只做「录顺的配音 + 剪干净 + 让画面跟着声音走」。
+
+---
+
+## 工程侧现状（2026-10-18 考察摘要）
+
+> 功能层面的欠账见上一节；这里只记「代码库本身」的状态与待办。
+> 「工作区改动」指当时尚未提交的改动。
+
+**规模**
+
+| 项 | 数值 |
+|---|---|
+| 提交数 / 跟踪文件 | 13 个提交 / 91 个文件 |
+| 应用代码 | `src/` 34 个文件、约 16,200 行（其中 `main.js` 3,269 行） |
+| 测试代码 | 13 个 `test-*.mjs` + `run-tests.mjs`，约 6,270 行 |
+| 桌面壳 | WPF 约 1,010 行（已发布）；Electron 约 894 行（开发中） |
+| 运行时依赖 | 仅测试用 `playwright-core`；无构建步骤 |
+
+**工作区改动（未提交）**
+
+- 新增 `desktop-electron/`（Electron 壳，见「Electron 桌面壳」一节）。
+- `scripts/serve.mjs`：本地服务实现抽到 `desktop-electron/server.mjs`，网页版与 Electron 版共用；
+  顺带修复 `PORT=0` 从未生效、`PORT=''` / 纯空白 / 非数字会被误当成随机端口的边界问题。
+- `desktop/installer.iss` 与 `.github/workflows/desktop.yml`：安装包文件名改为纯 ASCII ——
+  中文通配符会让 `upload-artifact` 丢掉文件名前缀（实测产出过以 `-` 开头的文件）；
+  用户可见的程序名仍为中文。
+
+**待办 / 风险（工程侧）**
+
+1. **Electron 壳并入主仓库前**：`test-asar-path.mjs` / `test-encoding.mjs` / `test-server-security.mjs`
+   三个安全测试硬编码了本机绝对路径 `D:/project/donghua/...`，需改成相对导入，否则换机器与 CI 上必挂。
+2. **`ci.yml` 的源码打包清单缺 `desktop-electron`**：一旦提交 Electron 壳而不同步补上，
+   发行 zip 里的 `npm start` 会因找不到 `server.mjs` 直接坏掉。
+3. **Electron 壳未接线 CI**：`smoke.mjs` 与 `traversal-under-asar.mjs` 已就绪，等一个 workflow 把它们跑起来。
+4. **版本号三处手工同步**：`package.json` / `desktop/BlockAnim.csproj` / `desktop/installer.iss`
+   都写着 0.4.1，CI 无一致性校验。
+5. **孤儿测试**：`test-gif.mjs`、`test-mp4.mjs` 未接入 12 套件与 CI。
+6. **npm scripts 不全**：套件 9（未保存状态）、10（图片缓存）没有独立 `test:*` 入口。
+
+**抽样验证**：`node run-tests.mjs` → 59/59 通过（2026-10-18）。
 
 ---
 
