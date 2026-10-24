@@ -1,6 +1,6 @@
 {
   "name": "block-anim-factory",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "type": "module",
   "description": "积木动画工厂 · 用积木搭动画逻辑的可视化编程动画制作软件（零构建、零依赖纯前端）",

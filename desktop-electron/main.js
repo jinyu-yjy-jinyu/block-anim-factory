@@ -18,7 +18,7 @@
      server.js 的 startServer 直接透传 0 给 listen()。
    ============================================================ */
 
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 
@@ -54,6 +54,37 @@ if (!gotLock) {
 } else {
   let mainWindow = null;
   let server = null;
+
+  /* preload 的 desktopBridge.saveAs 通过这个通道请求主进程写盘。
+     以前只有 preload 的 invoke，没有这里的 handler —— 页面一旦调用就报
+     「No handler registered for 'desktop:save-as'」，大文件保存能力形同虚设。
+     写盘路径必须由系统保存对话框选择；页面只提供内容与建议文件名，
+     不能直接指定任意路径。 */
+  ipcMain.handle('desktop:save-as', async (event, payload) => {
+    try {
+      const raw = payload && payload.buffer;
+      if (!raw || typeof raw.byteLength !== 'number') {
+        return { saved: false, reason: 'invalid-payload' };
+      }
+
+      const suggested = String(payload.suggestedName || '')
+        .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+        .trim()
+        .slice(0, 180) || '导出文件';
+
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const opts = { title: '保存导出文件', defaultPath: suggested };
+      const { canceled, filePath } = win
+        ? await dialog.showSaveDialog(win, opts)
+        : await dialog.showSaveDialog(opts);
+      if (canceled || !filePath) return { saved: false, reason: 'canceled' };
+
+      await fs.promises.writeFile(filePath, Buffer.from(raw));
+      return { saved: true, path: filePath };
+    } catch (e) {
+      return { saved: false, reason: String((e && e.message) || e) };
+    }
+  });
 
   /**
    * 找出要服务的 Web 根目录。

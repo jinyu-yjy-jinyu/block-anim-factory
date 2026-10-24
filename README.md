@@ -522,9 +522,8 @@ await BlockAnim.batchRender(
   但目前没有账号体系和真实的支付/结算通道。
 - **ffmpeg.wasm 离线打包**：CDN 地址是硬编码的 unpkg，完全离线环境下 MP4 会自动降级到 WebM 或帧序列。
 - **Lottie / 交互式 HTML 导出**：规划里列了，没做。
-- **macOS / Linux 桌面版**：只做了 Windows。WebView2 是 Windows 专有的，
-  另外两个平台要换成 WKWebView / WebKitGTK，是另一套壳的工程量。
-  Electron 壳（`desktop-electron/`）就是为跨平台准备的另一条路线，目前在开发中。
+- **macOS / Linux 桌面版**：WPF 壳只支持 Windows；跨平台路线是 `desktop-electron/`，
+  已接入 GitHub Actions，由 CI 构建 Windows / macOS / Linux 产物并挂到发行版。
 
 规划里「明确不做的清单」同样被尊重：不碰多轨剪辑与调色、不做专业混音、不做 3D、
 不追 Scratch 式趣味、不做移动端。音频只做「录顺的配音 + 剪干净 + 让画面跟着声音走」。
@@ -546,7 +545,7 @@ await BlockAnim.batchRender(
 | 桌面壳 | WPF 约 1,010 行（已发布）；Electron 约 894 行（开发中） |
 | 运行时依赖 | 仅测试用 `playwright-core`；无构建步骤 |
 
-**工作区改动（未提交）**
+**工作区改动（2026-10-18 快照，现已并入 main）**
 
 - 新增 `desktop-electron/`（Electron 壳，见「Electron 桌面壳」一节）。
 - `scripts/serve.mjs`：本地服务实现抽到 `desktop-electron/server.mjs`，网页版与 Electron 版共用；
@@ -555,19 +554,16 @@ await BlockAnim.batchRender(
   中文通配符会让 `upload-artifact` 丢掉文件名前缀（实测产出过以 `-` 开头的文件）；
   用户可见的程序名仍为中文。
 
-**待办 / 风险（工程侧）**
+**待办 / 风险（工程侧，2026-10-24 更新）**
 
-1. **Electron 壳并入主仓库前**：`test-asar-path.mjs` / `test-encoding.mjs` / `test-server-security.mjs`
-   三个安全测试硬编码了本机绝对路径 `D:/project/donghua/...`，需改成相对导入，否则换机器与 CI 上必挂。
-2. **`ci.yml` 的源码打包清单缺 `desktop-electron`**：一旦提交 Electron 壳而不同步补上，
-   发行 zip 里的 `npm start` 会因找不到 `server.mjs` 直接坏掉。
-3. **Electron 壳未接线 CI**：`smoke.mjs` 与 `traversal-under-asar.mjs` 已就绪，等一个 workflow 把它们跑起来。
-4. **版本号三处手工同步**：`package.json` / `desktop/BlockAnim.csproj` / `desktop/installer.iss`
-   都写着 0.4.1，CI 无一致性校验。
-5. **孤儿测试**：`test-gif.mjs`、`test-mp4.mjs` 未接入 12 套件与 CI。
-6. **npm scripts 不全**：套件 9（未保存状态）、10（图片缓存）没有独立 `test:*` 入口。
+1. ~~Electron 安全测试硬编码本机绝对路径~~：已改为相对导入，CI 可直接执行。
+2. ~~`ci.yml` 源码打包清单缺 `desktop-electron`~~：已补入打包清单。
+3. ~~Electron 壳未接线 CI~~：`desktop-electron.yml` 已覆盖三平台打包、冒烟与安全测试。
+4. ~~版本号三处手工同步~~：`check-version.mjs` 已覆盖四处（含 `desktop-electron/package.json`），版本升至 0.4.2。
+5. **孤儿测试**：`test-gif.mjs`、`test-mp4.mjs` 仍未接入 12 套件主流程，需单独运行。
+6. ~~npm scripts 不全~~：`test:markdirty`、`test:renderer-img` 已补。
 
-**抽样验证**：`node run-tests.mjs` → 59/59 通过（2026-10-18）。
+**抽样验证**：`npm test` → 12 套件全部通过、无跳过（2026-10-24）。
 
 ---
 
