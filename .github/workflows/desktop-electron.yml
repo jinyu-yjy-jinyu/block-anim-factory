@@ -56,6 +56,14 @@ jobs:
         env:
           ELECTRON_SMOKE_ASAR: ''
 
+      - name: 复制 Web 资源到打包目录
+        working-directory: desktop-electron
+        shell: bash
+        run: |
+          cp ../index.html ./index.html
+          rm -rf ./src
+          cp -r ../src ./src
+
       - name: 打包发行版
         working-directory: desktop-electron
         run: npm run dist

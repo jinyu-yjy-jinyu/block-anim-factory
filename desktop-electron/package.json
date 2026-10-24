@@ -25,9 +25,9 @@
       "main.js",
       "preload.js",
       "server.mjs",
-      "../index.html",
-      "../src/**/*",
-      "../scripts/serve.mjs"
+      "index.html",
+      "src/**/*",
+      "package.json"
     ],
     "mac": {
       "target": ["dmg", "zip"],
