@@ -49,9 +49,9 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a node smoke.mjs
+            xvfb-run -a npx electron --no-sandbox --disable-gpu smoke.mjs
           else
-            node smoke.mjs
+            npx electron --no-sandbox --disable-gpu smoke.mjs
           fi
         env:
           ELECTRON_SMOKE_ASAR: ''
