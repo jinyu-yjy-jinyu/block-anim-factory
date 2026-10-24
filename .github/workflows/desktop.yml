@@ -227,13 +227,16 @@ jobs:
     # 而 workflow_dispatch 分支在不填 tag 时会拿 ref_name 回退成分支名 main，
     # 于是往一个叫 main 的 tag 上挂 —— 静默挂错地方。
     # 现在只认手动触发且输入非空的 tag，其余一律跳过。
-    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
 
     # 写权限只给这个 job。build job 不需要写仓库。
     permissions:
       contents: write
 
     steps:
+      - name: 确定标签
+        run: echo "TAG=v$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+
       - name: 下载 zip
         uses: actions/download-artifact@v4
         with:
@@ -251,7 +254,7 @@ jobs:
         with:
           # 只指定 tag_name，不给 name/body：
           # 这样是「往已有发行版追加资源」，不会覆盖原有的说明文字。
-          tag_name: ${{ inputs.tag }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || env.TAG }}
           # zip（便携版）与 setup.exe（安装版）都挂。
           # 两种都保留：有人想解压即用，有人要开始菜单/卸载入口。
           files: |

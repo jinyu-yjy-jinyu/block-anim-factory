@@ -80,10 +80,16 @@ jobs:
     name: 挂到发行版
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      - name: 确定标签
+        working-directory: desktop-electron
+        run: echo "TAG=v$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+
       - name: 下载所有平台产物
         uses: actions/download-artifact@v4
         with:
@@ -94,6 +100,6 @@ jobs:
       - name: 挂到已有的发行版
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || env.TAG }}
           files: dist/**/*
           make_latest: false
