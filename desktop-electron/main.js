@@ -100,6 +100,7 @@ if (!gotLock) {
     mainWindow = new BrowserWindow({
       width: 1440,
       height: 900,
+      center: true,
       minWidth: 1024,
       minHeight: 680,
       show: false,                    // 等 ready-to-show，避免白屏闪一下
