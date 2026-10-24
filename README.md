@@ -558,7 +558,7 @@ await BlockAnim.batchRender(
 1. ~~Electron 安全测试硬编码本机绝对路径~~：已改为相对导入，CI 可直接执行。
 2. ~~`ci.yml` 源码打包清单缺 `desktop-electron`~~：已补入打包清单。
 3. ~~Electron 壳未接线 CI~~：`desktop-electron.yml` 已覆盖三平台打包、冒烟与安全测试。
-4. ~~版本号三处手工同步~~：`check-version.mjs` 已覆盖四处（含 `desktop-electron/package.json`），版本升至 0.4.3。
+4. ~~版本号三处手工同步~~：`check-version.mjs` 已覆盖四处（含 `desktop-electron/package.json`），版本升至 0.4.4。
 5. **孤儿测试**：`test-mp4.mjs` 仍未接入 13 套件主流程，需单独运行；`test-gif.mjs` 已并入。
 6. ~~npm scripts 不全~~：`test:markdirty`、`test:renderer-img` 已补。
 
