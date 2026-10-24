@@ -6,8 +6,9 @@
 
    这里既测纯函数 resolveInsideRoot（快、可精确断言），
    也测真实 HTTP 服务（端到端）。 */
-import { startServer, resolveInsideRoot } from 'file:///D:/project/donghua/desktop-electron/server.mjs';
-import { resolve, sep } from 'node:path';
+import { startServer, resolveInsideRoot } from './server.mjs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, sep } from 'node:path';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,8 @@ const t = (n, f) => { try { f(); pass++; } catch (e) { fail++; failures.push(`${
 const eq = (a, b, m) => { if (String(a) !== String(b)) throw new Error(`${m || ''} 期望 ${b}，实际 ${a}`); };
 const ok = (v, m) => { if (!v) throw new Error(m || '期望为真'); };
 
-const ROOT = resolve('D:/project/donghua/src');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(__dirname, '..', 'src');
 console.log('测试根目录:', ROOT);
 
 /* ---------- 一、纯函数：resolveInsideRoot ---------- */

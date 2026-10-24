@@ -26,7 +26,8 @@ jobs:
           node-version: '20'
           cache: npm
 
-      - name: 安装依赖
+      - name: 校验版本号一致性
+        run: npm run check:version
         run: npm ci
 
       # playwright-core 只是个驱动库，不自带浏览器。
@@ -72,7 +73,7 @@ jobs:
       - name: 打包源码
         run: |
           mkdir -p dist
-          cp -r index.html src scripts desktop package.json package-lock.json README.md .gitignore dist/
+          cp -r index.html src scripts desktop desktop-electron package.json package-lock.json README.md .gitignore dist/
           cp run-tests.mjs test-*.mjs make-screenshots.mjs dist/
           mkdir -p dist/screenshots
           cp screenshots/*.png dist/screenshots/

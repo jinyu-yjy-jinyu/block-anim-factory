@@ -1198,7 +1198,7 @@ function drawFrame() {
   if (!ir) return;
   // 统一音源：有真实音频就读真实音频，否则回落到合成包络
   const audio = App.audioSource || App.audio;
-  const { state } = evaluateFrame(ir, App.time, audio, {
+  const { state, ctx } = evaluateFrame(ir, App.time, audio, {
     customLibrary: App.customLibrary,
     onCustomBlockError: (layer, e) => {
       if (!drawFrame._cbErr || drawFrame._cbErr !== e.message) {
@@ -1207,6 +1207,14 @@ function drawFrame() {
       }
     },
   });
+  if (ctx && ctx.budgetExceeded) {
+    if (!drawFrame._budgetWarned) {
+      drawFrame._budgetWarned = true;
+      toast('积木嵌套过深，本帧已截断（防止界面卡死）。请简化嵌套。', 'warn', 4200);
+    }
+  } else {
+    drawFrame._budgetWarned = false;
+  }
   state.ir = ir;
   state.order = ir.layers.map(l => l.id);
   const dpr = window.devicePixelRatio || 1;

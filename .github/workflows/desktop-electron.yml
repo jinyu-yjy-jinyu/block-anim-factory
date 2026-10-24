@@ -1,0 +1,42 @@
+name: Electron 壳
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: electron-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Electron 壳测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装 Electron 壳依赖
+        working-directory: desktop-electron
+        run: npm install
+
+      - name: 安全测试（目录穿越 / 编码 / asar 路径）
+        working-directory: desktop-electron
+        run: |
+          node test-asar-path.mjs
+          node test-encoding.mjs
+          node test-server-security.mjs
+
+      - name: 无头冒烟（Electron + 服务 + 页面 + VideoEncoder）
+        working-directory: desktop-electron
+        run: xvfb-run -a node smoke.mjs
+        env:
+          ELECTRON_SMOKE_ASAR: ''

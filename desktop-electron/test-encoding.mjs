@@ -7,15 +7,17 @@
      %252e%252e → 解一次 = %2e%2e → 解两次 = ..
    如果 startServer 和 resolveInsideRoot 各解一次，就会正好变成 ..。
    */
-import { resolveInsideRoot } from 'file:///D:/project/donghua/desktop-electron/server.mjs';
-import { resolve, sep } from 'node:path';
+import { resolveInsideRoot } from './server.mjs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, sep } from 'node:path';
 
 let pass = 0, fail = 0; const failures = [];
 const t = (n, f) => { try { f(); pass++; } catch (e) { fail++; failures.push(`${n} → ${e.message}`); } };
 const eq = (a, b, m) => { if (String(a) !== String(b)) throw new Error(`${m || ''} 期望 ${b}，实际 ${a}`); };
 const ok = (v, m) => { if (!v) throw new Error(m || '期望为真'); };
 
-const ROOT = 'D:/project/donghua/desktop-electron';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = __dirname;
 
 t('编码: %2e%2e 被解码后拒绝（云端踩到的那个洞）', () => {
   eq(resolveInsideRoot(ROOT, '/%2e%2e/package.json').ok, false);

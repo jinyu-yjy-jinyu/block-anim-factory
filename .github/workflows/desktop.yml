@@ -45,6 +45,14 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 校验版本号一致性
+        run: npm run check:version
+
       # ---- 逻辑测试：先确认 Web 应用本身是好的，再去打包 ----
       - name: 逻辑套件
         run: |

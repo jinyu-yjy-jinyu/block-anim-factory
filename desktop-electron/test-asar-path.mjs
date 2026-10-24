@@ -12,8 +12,9 @@
      这才是它真正的价值。
    ============================================================ */
 
-import { resolveInsideRoot } from 'file:///D:/project/donghua/desktop-electron/server.mjs';
-import { resolve, sep, posix } from 'node:path';
+import { resolveInsideRoot } from './server.mjs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, sep, posix } from 'node:path';
 
 let pass = 0, fail = 0; const failures = [];
 const t = (n, f) => { try { f(); pass++; } catch (e) { fail++; failures.push(`${n} → ${e.message}`); } };
@@ -22,7 +23,8 @@ const ok = (v, m) => { if (!v) throw new Error(m || '期望为真'); };
 
 /* 模拟 asar 虚拟路径。注意：在 Windows 上 path.resolve 会把 / 转成 \，
    而 asar 在跨平台时两边写法都有，所以测两个形态。 */
-const ASAR_WIN = resolve('D:/project/donghua/desktop-electron/out/app.asar');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ASAR_WIN = resolve(__dirname, 'out', 'app.asar');
 const ASAR_POSIX = '/opt/app/resources/app.asar';
 
 console.log('asar root (win 形态):', ASAR_WIN);
