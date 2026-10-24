@@ -6,16 +6,21 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '把产物挂到这个标签的发行版上（留空则只构建）'
+        required: false
+        default: ''
 
 concurrency:
   group: electron-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Electron 壳测试 (${{ matrix.os }})
+  build:
+    name: Electron 打包 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -50,3 +55,37 @@ jobs:
           fi
         env:
           ELECTRON_SMOKE_ASAR: ''
+
+      - name: 打包发行版
+        working-directory: desktop-electron
+        run: npm run dist
+
+      - name: 上传打包产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: block-anim-factory-electron-${{ matrix.os }}
+          path: desktop-electron/dist/**
+          retention-days: 30
+          if-no-files-found: error
+
+  attach:
+    name: 挂到发行版
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+    permissions:
+      contents: write
+    steps:
+      - name: 下载所有平台产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: block-anim-factory-electron-*
+          merge-multiple: true
+
+      - name: 挂到已有的发行版
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: dist/**/*
+          make_latest: false
