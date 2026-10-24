@@ -135,9 +135,9 @@ const encodeResult = await page.evaluate(async () => {
     hasDesc,
     descLength: chunks.find(c => c.description)?.description?.length || 0,
     totalBytes: chunks.reduce((s, c) => s + c.data.length, 0),
-    // 传回前 8 帧的数据就够了（体积），后面用摘要代替
+    // stts 的 delta 单位是 media timescale（90000），不是微秒
     chunks: chunks.map(c => ({
-      type: c.type, delta: Math.round(1_000_000 / FPS),
+      type: c.type, delta: Math.round(90000 / FPS),
       description: c.description,
       size: c.data.length,
       data: Array.from(c.data),

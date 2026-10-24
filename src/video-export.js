@@ -150,6 +150,12 @@ export function webCodecsCodecString(kind, width, height, fps) {
   return `avc1.6400${pickAvcLevel(width, height, fps).toString(16).padStart(2, '0')}`;
 }
 
+/* MP4 媒体时间轴是 90000 Hz。WebCodecs 的 chunk.duration 是微秒，
+   必须换算后再写进 stts —— 直接塞 1_000_000/fps 会让播放速度慢 11 倍。 */
+export function mediaFrameDelta(fps) {
+  return Math.round(90000 / fps);
+}
+
 async function encodeWebCodecs(src, opts = {}) {
   const width = src.w & ~1, height = src.h & ~1;
   const isHevc = opts.codec === 'h265';
@@ -224,8 +230,8 @@ async function encodeWebCodecs(src, opts = {}) {
   if (encodeError) throw encodeError;
   if (shouldCancel()) throw new Error('已取消');
   if (!chunks.length) throw new Error('编码器没有产出任何数据');
-  // 每帧的真实时长：WebCodecs 给的是微秒，转成 media timescale（90000）
-  const delta = Math.round(1_000_000 / src.fps);
+  // 每帧的真实时长：统一换算成 media timescale（90000）
+  const delta = mediaFrameDelta(src.fps);
   for (const c of chunks) c.delta = delta;
   return { chunks, codec, width, height };
 }
@@ -326,7 +332,7 @@ function muxMP4({ chunks, width, height, fps, codec = 'avc1' }) {
 
   const MOVIE_TIMESCALE = 1000;
   const MEDIA_TIMESCALE = 90000;      // H.264 惯例，帧时长取整更准
-  const frameDelta = Math.round(MEDIA_TIMESCALE / fps);
+  const frameDelta = mediaFrameDelta(fps);
 
   const desc = pickDescription(chunks);
 
@@ -623,6 +629,18 @@ function verifyMP4(buf, expect = {}) {
       if (trak) {
         const mdia = findBox(trak.body, trak.end, 'mdia');
         if (mdia) {
+          // mdhd：媒体时间轴与总时长，用来核对 stts 的采样时长
+          const mdhd = findBox(mdia.body, mdia.end, 'mdhd');
+          if (mdhd) {
+            const version = buf[mdhd.body];
+            if (version === 1) {
+              result.mediaTimescale = dv.getUint32(mdhd.body + 20);
+              result.mediaDuration = Number(dv.getBigUint64(mdhd.body + 24));
+            } else {
+              result.mediaTimescale = dv.getUint32(mdhd.body + 12);
+              result.mediaDuration = dv.getUint32(mdhd.body + 16);
+            }
+          }
           const minf = findBox(mdia.body, mdia.end, 'minf');
           if (minf) {
             const stbl = findBox(minf.body, minf.end, 'stbl');
@@ -634,6 +652,25 @@ function verifyMP4(buf, expect = {}) {
                 const flags = vf & 0xffffff;
                 const count = dv.getUint32(bx.body + 4);
                 result.tables[name] = { entryCount: count, flags };
+              }
+              // stts 的每条游程长度 × delta 应等于 mdhd duration。
+              // 之前 chunk.delta 存的是微秒（1_000_000/fps），却被当成
+              // 90000 时间轴的单位写进 stts，成片播放慢约 11 倍。
+              const stts = findBox(stbl.body, stbl.end, 'stts');
+              if (stts) {
+                const count = dv.getUint32(stts.body + 4);
+                const runs = [];
+                let total = 0;
+                for (let i = 0; i < count; i++) {
+                  const runCount = dv.getUint32(stts.body + 8 + i * 8);
+                  const delta = dv.getUint32(stts.body + 12 + i * 8);
+                  runs.push({ count: runCount, delta });
+                  total += runCount * delta;
+                }
+                result.tables.stts = Object.assign(result.tables.stts || {}, {
+                  runs, totalDuration: total,
+                });
+                result.sttsTotalDuration = total;
               }
               // stsz 的 entry_count 在第 3 个 u32（version+flags, sample_size, sample_count）
               const stsz = findBox(stbl.body, stbl.end, 'stsz');
@@ -700,6 +737,8 @@ function verifyMP4(buf, expect = {}) {
     ['stco.entry_count > 0', (t.stco?.entryCount ?? 0) > 0],
     ['stsz 字节总和 == mdat 字节数', t.stsz?.sampleCount > 0 && result.stszTotalBytes === result.mdatBytes],
     ['mdat 有真实数据', result.mdatBytes > 0],
+    ['stts 总时长 == mdhd 时长', result.mediaDuration > 0 && result.sttsTotalDuration === result.mediaDuration],
+    ['媒体时间轴为 90000', result.mediaTimescale === 90000],
     [`有 ${configBox}`, result.hasConfig === true],
   ];
   result.checks = checks.map(([name, pass]) => ({ name, pass }));

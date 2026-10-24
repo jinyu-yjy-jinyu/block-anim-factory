@@ -360,6 +360,13 @@ t('导出:帧率与区间非法时 total 为 0', () => {
   const src = new VE.FrameSource(ir, null, { fps: 24, from: 2, to: 1 });
   eq(src.total, 0);
 });
+t('导出:帧时长写入 90000 时间轴而不是微秒', () => {
+  // 回归：chunk.delta 曾用 1_000_000/fps（微秒）直接写 stts，
+  // 被 90000 时间轴解释后成片播放慢约 11 倍。
+  eq(VE.mediaFrameDelta(30), 3000);
+  eq(VE.mediaFrameDelta(24), 3750);
+  eq(VE.mediaFrameDelta(60), 1500);
+});
 t('导出:H.264/H.265 级别按分辨率选择', () => {
   // 回归：固定 avc1.42001f（Baseline 3.1）装不下 1080p（8160 宏块 > 3600）。
   eq(VE.webCodecsCodecString('h264', 1280, 720, 30), 'avc1.64001f', '720p30');
@@ -382,6 +389,9 @@ t('导出:HEVC 封装写入 hvc1/hvcC 而不是 avc1/avcC', () => {
   ok(hevc.verify.ok, 'HEVC 封装自检失败：'
     + hevc.verify.checks.filter(c => !c.pass).map(c => c.name).join('；')
     + (hevc.verify.errors.length ? ' / ' + hevc.verify.errors.join('；') : ''));
+  eq(hevc.verify.mediaTimescale, 90000, '媒体时间轴');
+  eq(hevc.verify.tables.stts.runs[0].delta, 3000, 'stts delta 应按 90000 时间轴');
+  eq(hevc.verify.sttsTotalDuration, hevc.verify.mediaDuration, 'stts 总时长应等于 mdhd 时长');
   const buf = Buffer.from(hevc.bytes);
   ok(buf.includes(Buffer.from('hvc1')), '文件里没有 hvc1 标记');
   ok(!buf.includes(Buffer.from('avc1')), 'HEVC 文件里仍出现 avc1');
