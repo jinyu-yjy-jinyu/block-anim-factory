@@ -1,0 +1,232 @@
+/* ============================================================
+   theme-light.css · 浅色主题
+   ------------------------------------------------------------
+   只做覆盖，不改布局。所有硬编码的深色表面都在这里换成浅色，
+   颜色变量在 :root[data-theme="light"] 中重新定义。
+   ============================================================ */
+:root[data-theme="light"]{
+  --bg:#eef2f8;
+  --bg2:#f6f8fc;
+  --bg3:#e8edf5;
+  --panel:#f8fafd;
+  --panel2:#f1f5fa;
+  --line:#dbe2ec;
+  --line2:#c6d0de;
+  --fg:#182231;
+  --fg2:#43536a;
+  --fg3:#74839a;
+  --accent:#0b8fca;
+  --accent-soft:rgba(11,143,202,.13);
+  --accent2:#d93c78;
+  --ok:#0e9f6e;
+  --warn:#b87900;
+  --err:#d23448;
+  --muted:var(--fg3);
+  --bg-2:var(--bg2);
+  --bg-3:var(--bg3);
+  --workspace:#e8eef7;
+
+  color-scheme:light;
+}
+
+:root[data-theme="light"] ::selection{background:rgba(11,143,202,.22)}
+:root[data-theme="light"] ::-webkit-scrollbar-thumb{background:#c4cfdd}
+:root[data-theme="light"] ::-webkit-scrollbar-thumb:hover{background:#aebccd}
+
+:root[data-theme="light"] input,
+:root[data-theme="light"] select,
+:root[data-theme="light"] textarea{
+  background:#fff;border-color:var(--line);color:var(--fg);
+}
+
+/* ---------- 菜单 / 工具条 ---------- */
+:root[data-theme="light"] #menubar{
+  background:linear-gradient(180deg,#ffffff,#f2f6fb);
+  border-bottom-color:var(--line);
+}
+:root[data-theme="light"] .brand .logo{
+  background:linear-gradient(145deg,#e6eef8,#ffffff);border-color:#c7d4e4;
+  box-shadow:0 2px 6px rgba(30,50,80,.12);
+}
+:root[data-theme="light"] .brand em{
+  border-color:rgba(11,143,202,.32);background:rgba(11,143,202,.08);
+}
+:root[data-theme="light"] .dropdown{
+  background:#fff;box-shadow:0 18px 50px rgba(20,40,70,.18);
+}
+:root[data-theme="light"] .btn-export{
+  color:#fff;background:linear-gradient(135deg,#1aa5dc,#3f7ef7);
+  box-shadow:0 4px 14px rgba(30,120,200,.25);
+}
+:root[data-theme="light"] .tb:hover{background:#e9f0f9;border-color:#c0ccdb}
+:root[data-theme="light"] .tbf select{background:#fff;border-color:var(--line)}
+:root[data-theme="light"] .theme-btn:hover{background:#e9f0f9;color:var(--fg)}
+:root[data-theme="light"] button.primary{color:#fff}
+
+/* ---------- 右侧面板 ---------- */
+:root[data-theme="light"] .panel-head{background:#f7fafd}
+:root[data-theme="light"] #rightPanel{background:var(--panel2)}
+:root[data-theme="light"] #previewBar{background:#f7fafd}
+:root[data-theme="light"] .pv-chip{background:#eef3fa;border-color:var(--line)}
+:root[data-theme="light"] #stageWrap{
+  background:radial-gradient(ellipse at 50% 42%,#dde7f3 0%,#eef3f9 70%);
+}
+:root[data-theme="light"] #stageBox{
+  box-shadow:0 20px 55px rgba(30,50,80,.25),0 0 0 1px #c3cfdf;
+}
+:root[data-theme="light"] .tabs{background:#f3f7fc}
+:root[data-theme="light"] .tab:hover{background:#e9f0f9;color:var(--fg2)}
+:root[data-theme="light"] .tab.active{background:#fff}
+:root[data-theme="light"] .layer-tools{background:#f6f9fd}
+:root[data-theme="light"] .layer-tools button{background:#fff}
+:root[data-theme="light"] .layer:hover{background:#eef4fb;color:var(--fg)}
+:root[data-theme="light"] .layer .eye:hover{background:rgba(30,50,80,.08)}
+:root[data-theme="light"] .layer .eye.off{color:#aebacb}
+:root[data-theme="light"] .layer.sel{
+  background:linear-gradient(90deg,rgba(11,143,202,.14),rgba(11,143,202,.04));
+  border-color:rgba(11,143,202,.35);
+}
+:root[data-theme="light"] .pat-tile{background:#fff}
+:root[data-theme="light"] .pat-tile:hover{background:#f2f7fd}
+:root[data-theme="light"] .settings-group{background:#fff}
+:root[data-theme="light"] .field>input,
+:root[data-theme="light"] .field>select,
+:root[data-theme="light"] .field>textarea{background:#fff;border-color:var(--line)}
+:root[data-theme="light"] .blocks-tab-card{
+  background:linear-gradient(140deg,rgba(11,143,202,.1),transparent 70%);
+}
+
+/* ---------- 积木工作区 ---------- */
+:root[data-theme="light"] .cat-rail{background:#f2f6fb;border-right-color:var(--line)}
+:root[data-theme="light"] .cat-dot{background:color-mix(in srgb,var(--c,#4a8cff) 18%,#f2f6fb)}
+:root[data-theme="light"] .cat-dot:hover{background:color-mix(in srgb,var(--c,#4a8cff) 28%,#f2f6fb)}
+:root[data-theme="light"] .block-palette{background:#f7f9fd;border-right-color:var(--line2)}
+:root[data-theme="light"] .palette-hint{background:#f2f6fb}
+:root[data-theme="light"] .bslot .stack.nested{box-shadow:inset 0 2px 6px rgba(30,50,80,.12)}
+:root[data-theme="light"] .block.selected{
+  box-shadow:0 0 0 2px #fff,0 0 0 5px rgba(11,143,202,.42),0 6px 18px rgba(30,50,80,.22);
+}
+:root[data-theme="light"] .dropzone.over{background:rgba(11,143,202,.16)}
+
+/* ---------- 时间线 ---------- */
+:root[data-theme="light"] #timelinePanel{background:#f4f8fc}
+:root[data-theme="light"] #timelinePanel.dock-left{
+  border-right-color:var(--line2);box-shadow:6px 0 20px rgba(30,50,80,.08);
+}
+:root[data-theme="light"] #timelinePanel.dock-bottom{box-shadow:0 -8px 24px rgba(30,50,80,.08)}
+:root[data-theme="light"] #timelinePanel.dock-float{
+  background:#fbfcfe;box-shadow:0 26px 80px rgba(20,40,70,.25);
+}
+:root[data-theme="light"] #tlToolbar{background:linear-gradient(180deg,#fff,#f4f7fb);border-bottom-color:var(--line)}
+:root[data-theme="light"] .tl-btn{background:#fff;border-color:#d7dfeb;color:var(--fg2)}
+:root[data-theme="light"] .tl-btn:hover{background:#eef4fb;border-color:#bccadb;color:var(--fg)}
+:root[data-theme="light"] .tl-play{background:linear-gradient(135deg,#1aa5dc,#3f7ef7);border-color:transparent;color:#fff;box-shadow:0 2px 10px rgba(30,120,200,.25)}
+:root[data-theme="light"] .tl-play:hover{background:linear-gradient(135deg,#1a9bcf,#3474ef)}
+:root[data-theme="light"] .tl-sep{background:#d7dfeb}
+:root[data-theme="light"] #tlZoom::-webkit-slider-runnable-track{background:linear-gradient(90deg,var(--accent),#c3d2e4)}
+:root[data-theme="light"] #tlZoom::-webkit-slider-thumb{background:#fff;box-shadow:0 0 0 3px rgba(11,143,202,.24),0 1px 4px rgba(30,50,80,.3)}
+:root[data-theme="light"] .tl-duration input{background:#fff;border-color:var(--line)}
+:root[data-theme="light"] #tlHeaders{background:#f4f7fb;border-right-color:var(--line2)}
+:root[data-theme="light"] #tlHeaderSpacer{background:#f8fafd;border-bottom-color:var(--line)}
+:root[data-theme="light"] #tlHeaderSpacer button:hover{background:#e9f0f9;border-color:#c4cfdd}
+:root[data-theme="light"] .tl-head{background:#f6f9fd;border-bottom-color:#e6ecf4;color:var(--fg2)}
+:root[data-theme="light"] .tl-head:hover{background:#eef4fb;color:var(--fg)}
+:root[data-theme="light"] .tl-head.active{
+  background:linear-gradient(90deg,rgba(11,143,202,.12),rgba(11,143,202,.02));color:var(--fg);
+}
+:root[data-theme="light"] .tl-head .tl-eye:hover{background:rgba(30,50,80,.08)}
+:root[data-theme="light"] .tl-head .tl-eye.off{color:#aebacb}
+:root[data-theme="light"] #tlMain{background:#fff}
+:root[data-theme="light"] #ruler{background:#f7fafd;border-bottom-color:#d9e2ee}
+:root[data-theme="light"] .tick{border-left-color:#dbe4ef}
+:root[data-theme="light"] .tick.major{border-left-color:#b9c6d8}
+:root[data-theme="light"] .tick.minor{border-left-color:#e3eaf4}
+:root[data-theme="light"] .tick i{color:#66758c}
+:root[data-theme="light"] .tl-lane{background:#fff;border-bottom-color:#e9eef6}
+:root[data-theme="light"] .tl-lane:nth-child(even){background:#fbfcfe}
+:root[data-theme="light"] .tl-lane[data-kind="marker"]{background:#fcfaf3}
+:root[data-theme="light"] .tl-lane[data-kind="subtitle"]{background:#fbfaff}
+:root[data-theme="light"] .tl-lane.active{background:#f3f9ff}
+:root[data-theme="light"] .tl-lane-empty{color:#8a97ab}
+:root[data-theme="light"] .tl-layer-clip{
+  background:linear-gradient(180deg,color-mix(in srgb,var(--clip-color) 18%,#ffffff),#f4f7fb 94%);
+  border-color:color-mix(in srgb,var(--clip-color) 45%,#d5deea);
+}
+:root[data-theme="light"] .tl-layer-clip .clip-name{color:#1e2a3a;text-shadow:none}
+:root[data-theme="light"] .tl-layer-clip .clip-count{color:rgba(30,40,60,.52)}
+:root[data-theme="light"] .tl-layer-clip .clip-hatch{
+  background-image:repeating-linear-gradient(135deg,rgba(30,50,80,.035) 0 5px,transparent 5px 10px);
+}
+:root[data-theme="light"] .tl-sub-clip{
+  color:#3d2b78;background:linear-gradient(180deg,rgba(153,102,255,.24),rgba(153,102,255,.12));
+  border-color:rgba(140,110,230,.55);
+}
+:root[data-theme="light"] .tl-sub-clip:hover{background:linear-gradient(180deg,rgba(153,102,255,.36),rgba(153,102,255,.2))}
+:root[data-theme="light"] .tl-audio-clip{
+  background:linear-gradient(180deg,rgba(207,99,207,.2),rgba(207,99,207,.08));
+  border-color:rgba(200,120,200,.5);
+}
+:root[data-theme="light"] .tl-audio-clip:hover{border-color:#b269b2}
+:root[data-theme="light"] .tl-audio-clip .clip-name{color:#5b2c5b;text-shadow:none}
+:root[data-theme="light"] .marker .lbl{color:#8a6400;background:rgba(255,190,60,.16)}
+:root[data-theme="light"] .marker:hover .lbl,
+:root[data-theme="light"] .marker.active .lbl{background:rgba(255,190,60,.26)}
+:root[data-theme="light"] #playhead{background:#0b8fca;box-shadow:0 0 8px rgba(11,143,202,.4)}
+:root[data-theme="light"] .ph-grip{background:#0b8fca}
+:root[data-theme="light"] .ph-grip::after{background:#fff}
+
+/* ---------- 调试器 / 弹窗 / 提示 ---------- */
+:root[data-theme="light"] #debugPanel{background:var(--panel)}
+:root[data-theme="light"] .dbg-title{background:#f2f6fb}
+:root[data-theme="light"] .dbg-line{border-bottom-color:#edf1f7}
+:root[data-theme="light"] .dbg-line.cur{background:#e3f1fc}
+:root[data-theme="light"] .dbg-line.hit{background:#fde8ee}
+:root[data-theme="light"] #modalLayer,
+:root[data-theme="light"] #exportLayer{background:rgba(30,45,65,.35)}
+:root[data-theme="light"] #modalCard,
+:root[data-theme="light"] #exportCard,
+:root[data-theme="light"] .exprpop{
+  background:#fff;box-shadow:0 30px 80px rgba(20,40,70,.25);
+}
+:root[data-theme="light"] .modal-body code{color:#0b6f9f;background:#eef3fa}
+:root[data-theme="light"] .modal-foot button,
+:root[data-theme="light"] #exportCard button{background:#eef3fa}
+:root[data-theme="light"] textarea.code{background:#f8fafd}
+:root[data-theme="light"] .progress{background:#e3eaf3}
+:root[data-theme="light"] #toast{background:#fff;box-shadow:0 14px 40px rgba(20,40,70,.2)}
+:root[data-theme="light"] #toast.ok{background:#eafaf2;border-color:#8fd9b8}
+:root[data-theme="light"] #toast.err{background:#fdecef;border-color:#eaa3ae}
+:root[data-theme="light"] .exprpop .pop-head{border-bottom-color:var(--line)}
+
+/* ---------- panels.css 内的组件 ---------- */
+:root[data-theme="light"] .node-canvas{
+  background:
+    radial-gradient(circle, rgba(30,50,80,.13) 1px, transparent 1px) 0 0 / 16px 16px,
+    var(--bg);
+}
+:root[data-theme="light"] .nnode{background:#fff;box-shadow:0 4px 14px rgba(30,50,80,.18)}
+:root[data-theme="light"] .nport .val{color:#9a6500}
+:root[data-theme="light"] .sub-item{border-bottom-color:rgba(30,50,80,.06)}
+:root[data-theme="light"] .sub-item:hover{background:rgba(30,50,80,.035)}
+:root[data-theme="light"] .sub-item.active{background:rgba(11,143,202,.1)}
+:root[data-theme="light"] .sub-item input[type="text"]{color:var(--fg)}
+:root[data-theme="light"] .meter{background:#e3eaf3}
+:root[data-theme="light"] .wave-wrap{background:#fff}
+:root[data-theme="light"] .data-table th{background:#f2f6fb}
+:root[data-theme="light"] .data-table td{border-bottom-color:#edf1f7}
+:root[data-theme="light"] .data-table tr:hover td{background:rgba(30,50,80,.04)}
+:root[data-theme="light"] .bind-row code{background:rgba(120,90,230,.12);color:#6b4cc4}
+:root[data-theme="light"] .bp-bar{background:#e3eaf3}
+:root[data-theme="light"] .fmt-card{background:#fff}
+:root[data-theme="light"] .fmt-card.on{background:rgba(11,143,202,.1)}
+:root[data-theme="light"] .cap-chip.off{background:rgba(30,50,80,.05)}
+
+/* ---------- panels-v3v4.css ---------- */
+:root[data-theme="light"] .mkt-cats button{background:rgba(30,50,80,.05)}
+:root[data-theme="light"] .mkt-item:hover{background:rgba(30,50,80,.04)}
+:root[data-theme="light"] .mkt-item.sel{background:rgba(11,143,202,.1)}
+:root[data-theme="light"] .mkt-cover{background:#eef3fa}
+:root[data-theme="light"] .ai-tab.active{background:rgba(11,143,202,.12)}
+:root[data-theme="light"] .ai-result .why{color:#74839a}
+:root[data-theme="light"] .git-item:hover{background:rgba(30,50,80,.04)}
+:root[data-theme="light"] .git-item.sel{background:rgba(11,143,202,.1)}

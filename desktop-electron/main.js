@@ -151,6 +151,23 @@ if (!gotLock) {
 
     mainWindow.once('ready-to-show', () => mainWindow.show());
 
+    /* 页面有未保存改动时会用 beforeunload 阻止关闭。Electron 默认尊重这个
+       阻止行为，但不会给用户任何提示，表现就是点 ✕ 没反应、程序关不掉。
+       这里补一个原生确认框：只有用户明确选择「仍然关闭」才放行。 */
+    mainWindow.webContents.on('will-prevent-unload', (event) => {
+      const choice = dialog.showMessageBoxSync(mainWindow, {
+        type: 'question',
+        buttons: ['取消', '仍然关闭'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        title: '有未保存的改动',
+        message: '当前工程还有未保存的改动。',
+        detail: '关闭后这些改动会丢失。确定要关闭吗？',
+      });
+      if (choice === 1) event.preventDefault();
+    });
+
     // 新窗口请求（target=_blank、外链）交给系统浏览器，不在应用里开
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:/i.test(url)) shell.openExternal(url);

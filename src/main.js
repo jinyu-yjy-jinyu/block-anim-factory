@@ -62,6 +62,9 @@ const App = {
   exportCancel: false,
   prefs: { fps: 24, width: 1920, height: 1080, duration: 6, bpm: 120, loudness: -14 },
 
+  /* 界面偏好：主题与时间线位置，持久化到 localStorage */
+  ui: { theme: 'dark', tlMode: 'left', tlWidth: 320, lastTlMode: 'left' },
+
   /* ---------- 新增子系统 ---------- */
   audioTracks: [],          // AudioTrack[]（真实音频）
   audioSource: null,        // UnifiedAudio：积木读到的统一音源
@@ -132,8 +135,21 @@ function boot() {
 
   initNewPanels();
 
+  loadUiPrefs();
+  applyTheme(App.ui.theme, { persist: false });
+  applyTimelineMode(App.ui.tlMode, { persist: false, relayout: false });
+
   syncProjectToUI();
   buildPalette();
+  App.paletteOpen = true;
+  App.paletteCat = App.paletteCat || (categories()[0] && categories()[0].key);
+  if (App.paletteCat) {
+    $('blockPalette').classList.remove('hidden');
+    renderPaletteFlyout();
+  }
+  syncPaletteRail();
+  // 窄窗口里积木库是浮层，默认收起，避免一打开就盖住画布
+  if (window.innerWidth < 1240) closePalette();
   renderLayerTree();
   BV.renderBlocks();
   renderInspector();
@@ -144,6 +160,10 @@ function boot() {
 
   bindGlobal();
   detectCapabilities().then(c => { App.caps = c; renderExportFormats(); });
+  // 初始化阶段 AudioDesk.setTracks 等会触发 onChange → markDirty。
+  // 刚打开还没有任何用户改动，不应一直显示「未保存」并拦截关窗口。
+  App.dirty = false;
+  $('statusText').textContent = '就绪';
   toast('就绪 · 空格播放，拖动积木搭建动画逻辑', 'ok', 2600);
 }
 
@@ -1298,9 +1318,114 @@ function layoutStage() {
   box.style.height = `${ir.project.height * App.zoomNum}px`;
   drawFrame();
 }
+/* ============================================================
+   界面偏好：主题 / 时间线停靠位置 / 左侧宽度
+   ============================================================ */
+const UI_PREFS_KEY = 'baf.uiPrefs.v1';
+
+function loadUiPrefs() {
+  try {
+    const raw = localStorage.getItem(UI_PREFS_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== 'object') return;
+    if (saved.theme === 'light' || saved.theme === 'dark') App.ui.theme = saved.theme;
+    if (['left', 'bottom', 'float', 'hidden'].includes(saved.tlMode)) App.ui.tlMode = saved.tlMode;
+    if (['left', 'bottom', 'float', 'hidden'].includes(saved.lastTlMode)) App.ui.lastTlMode = saved.lastTlMode;
+    const w = Number(saved.tlWidth);
+    if (Number.isFinite(w)) App.ui.tlWidth = clamp(w, 240, 460);
+  } catch { /* 隐私模式 / 禁用存储时退回默认值 */ }
+}
+
+function saveUiPrefs() {
+  try { localStorage.setItem(UI_PREFS_KEY, JSON.stringify(App.ui)); } catch { }
+}
+
+function applyTheme(theme, { persist = true } = {}) {
+  const next = theme === 'light' ? 'light' : 'dark';
+  App.ui.theme = next;
+  document.documentElement.dataset.theme = next;
+  const btn = $('themeBtn');
+  if (btn) {
+    btn.textContent = next === 'light' ? '☾' : '☀';
+    btn.title = next === 'light' ? '切换到深色主题' : '切换到浅色主题';
+  }
+  const sel = $('themeSelect');
+  if (sel) sel.value = next;
+  if (persist) saveUiPrefs();
+}
+
+function toggleTheme() {
+  applyTheme(App.ui.theme === 'light' ? 'dark' : 'light');
+  toast(App.ui.theme === 'light' ? '已切换到浅色主题' : '已切换到深色主题', 'ok', 1600);
+}
+
+function applyTimelineMode(mode, { persist = true, relayout = true } = {}) {
+  const next = ['left', 'bottom', 'float', 'hidden'].includes(mode) ? mode : 'left';
+  App.ui.tlMode = next;
+  if (next !== 'hidden') App.ui.lastTlMode = next;
+
+  const panel = $('timelinePanel');
+  const main = $('main');
+  if (panel) {
+    panel.classList.remove('dock-left', 'dock-bottom', 'dock-float', 'dock-hidden');
+    panel.classList.add('dock-' + next);
+    if (next !== 'bottom' && App.tlCollapsed) {
+      App.tlCollapsed = false;
+      panel.classList.remove('collapsed');
+      const cb = $('tlCollapseBtn');
+      if (cb) cb.textContent = '收起';
+    }
+    if (next === 'bottom') panel.style.height = App.tlUserHeight ? `${App.tlUserHeight}px` : '';
+    else panel.style.height = '';
+  }
+  if (main) {
+    main.classList.remove('tl-mode-left', 'tl-mode-bottom', 'tl-mode-float', 'tl-mode-hidden');
+    main.classList.add('tl-mode-' + next);
+  }
+  applyTimelineWidth(App.ui.tlWidth, false);
+  const sel = $('timelineModeSelect');
+  if (sel) sel.value = next;
+  if (persist) saveUiPrefs();
+  if (relayout) {
+    requestAnimationFrame(() => {
+      layoutStage();
+      if (next !== 'hidden') rebuildTimeline();
+    });
+  }
+}
+
+function applyTimelineWidth(px, relayout = false) {
+  const panel = $('timelinePanel');
+  if (panel) panel.style.setProperty('--tl-w', `${px}px`);
+  const input = $('timelineWidthInput');
+  if (input) input.value = String(Math.round(px));
+  if (relayout) {
+    requestAnimationFrame(() => {
+      layoutStage();
+      if (App.ui.tlMode === 'left') rebuildTimeline();
+    });
+  }
+}
+
+function setTimelineWidth(px) {
+  App.ui.tlWidth = clamp(Number(px) || 320, 240, 460);
+  applyTimelineWidth(App.ui.tlWidth, true);
+  saveUiPrefs();
+}
+
+function toggleTimelineVisibility() {
+  if (App.ui.tlMode === 'hidden') {
+    applyTimelineMode(App.ui.lastTlMode || 'left');
+    return;
+  }
+  App.ui.lastTlMode = App.ui.tlMode;
+  applyTimelineMode('hidden');
+}
+
 window.addEventListener('resize', () => {
   layoutStage();
-  if (App.tlZoomMode === 'fit' && !App.tlCollapsed) scheduleTimelineRefresh();
+  if (App.tlZoomMode === 'fit' && !App.tlCollapsed && App.ui.tlMode !== 'hidden') scheduleTimelineRefresh();
 });
 
 /* ============================================================
@@ -1966,6 +2091,16 @@ function addMarkerAtPlayhead() {
 function renderLayerTree() {
   const tree = $('layerTree');
   tree.innerHTML = '';
+  const countEl = $('patternCount');
+  if (countEl) {
+    const visible = App.ir.layers.filter(l => l.visible).length;
+    countEl.textContent = `${App.ir.layers.length} 层 · ${visible} 可见`;
+  }
+  const curEl = $('blocksTabLayer');
+  if (curEl) {
+    const cur = App.ir.layers.find(l => l.id === App.layerId);
+    curEl.textContent = cur ? `${cur.name} · ${(LAYER_TYPES[cur.type] || {}).label || cur.type}` : '—';
+  }
   for (const l of App.ir.layers) {
     const row = document.createElement('div');
     row.className = 'layer' + (l.id === App.layerId ? ' sel' : '');
@@ -2468,13 +2603,12 @@ function paletteAdd(op) {
   const def = defOf(op);
   if (!def) return;
   const layer = App.ir.layers.find(l => l.id === App.layerId);
-  if (!layer) { toast('请先在左侧选择一个图层', 'warn'); return; }
+  if (!layer) { toast('请先在「图案」里选择一个图层', 'warn'); return; }
   withUndo(() => { layer.blocks.push(BV.createBlock(op)); });
   BV.renderBlocks();
   renderInspector();
   drawFrame();
   scheduleTimelineRefresh();
-  switchTab('blocks');
   toast(`已添加「${def.label}」`, 'ok');
 }
 
@@ -3545,6 +3679,22 @@ function bindGlobal() {
     markDirty(); drawFrame();
   });
   $('zoomSelect').addEventListener('change', (e) => { App.zoom = e.target.value === 'fit' ? 'fit' : parseFloat(e.target.value); layoutStage(); });
+
+  /* 外观与时间线偏好 */
+  const themeSelect = $('themeSelect');
+  if (themeSelect) themeSelect.addEventListener('change', (e) => applyTheme(e.target.value));
+  const tlModeSelect = $('timelineModeSelect');
+  if (tlModeSelect) tlModeSelect.addEventListener('change', (e) => applyTimelineMode(e.target.value));
+  const tlWidthInput = $('timelineWidthInput');
+  if (tlWidthInput) tlWidthInput.addEventListener('input', (e) => setTimelineWidth(e.target.value));
+
+  /* 图案快捷新建 */
+  document.querySelectorAll('.pat-tile').forEach(btn => {
+    btn.addEventListener('click', () => {
+      addLayer(btn.dataset.layerType || 'rect');
+      switchTab('patterns');
+    });
+  });
   $('durationInput').addEventListener('change', (e) => {
     pushUndo();
     App.ir.project.duration = Math.max(0.1, parseFloat(e.target.value) || 1);
@@ -3629,15 +3779,27 @@ function doAction(act) {
     case 'edit.redo': redo(); break;
     case 'edit.dup': if (App.selectedBlock) dupBlock(App.selectedBlock); break;
     case 'edit.del': if (App.selectedBlock) delBlock(App.selectedBlock); break;
-    case 'edit.prefs': helpShortcuts(); break;
+    case 'edit.prefs': switchTab('settings'); break;
 
     case 'view.zoomFit': App.zoom = 'fit'; $('zoomSelect').value = 'fit'; layoutStage(); break;
     case 'view.zoomIn': App.zoom = Math.min(2, App.zoomNum * 1.25); layoutStage(); break;
     case 'view.zoomOut': App.zoom = Math.max(0.05, App.zoomNum / 1.25); layoutStage(); break;
-    case 'view.panelBlocks': switchTab('blocks'); break;
-    case 'view.panelLayers': focusLeft(); break;
-    case 'view.panelInspector': switchTab('inspector'); break;
+    case 'view.panelBlocks': focusBlocks(); break;
+    case 'view.focusBlocks': focusBlocks(); break;
+    case 'view.panelPatterns': switchTab('patterns'); focusRightPanel(); break;
+    case 'view.panelLayers': switchTab('patterns'); focusRightPanel(); break;
+    case 'view.panelInspector': switchTab('inspector'); focusRightPanel(); break;
     case 'view.shortcuts': helpShortcuts(); break;
+
+    case 'theme.toggle': toggleTheme(); break;
+    case 'prefs.open': switchTab('settings'); focusRightPanel(); break;
+
+    case 'tl.mode.left': applyTimelineMode('left'); toast('时间线已停靠左侧', 'ok', 1600); break;
+    case 'tl.mode.bottom': applyTimelineMode('bottom'); toast('时间线已停靠底部', 'ok', 1600); break;
+    case 'tl.mode.float': applyTimelineMode('float'); toast('时间线已浮空，可拖右下角调整', 'ok', 1800); break;
+    case 'tl.mode.hidden': applyTimelineMode('hidden'); toast('时间线已隐藏', 'ok', 1600); break;
+    case 'tl.hide': applyTimelineMode('hidden'); toast('时间线已隐藏 · 视图菜单可恢复', 'ok', 2000); break;
+    case 'tl.toggle': toggleTimelineVisibility(); break;
 
     case 'play': setPlaying(!App.playing); break;
     case 'rewind': App.time = 0; updatePlayhead(); drawFrame(); break;
@@ -3745,6 +3907,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x.dataset.tab === name));
   document.querySelectorAll('.tab-page').forEach(x => x.classList.toggle('active', x.id === 'tab-' + name));
   if (name === 'blocks') BV.renderBlocks();
+  if (name === 'patterns') renderLayerTree();
   if (name === 'inspector') renderInspector();
   if (name === 'nodes') refreshNodeGraph();
   if (name === 'subtitle') { App.subPanel.render(); App.subPanel.validate(); }
@@ -3752,6 +3915,7 @@ function switchTab(name) {
   if (name === 'data') App.dataPanel.renderBindings();
   if (name === 'market') { renderMarketList(); renderMarketDetail(App.selectedTemplateId); }
   if (name === 'git') renderGitLog();
+  if (name === 'settings') renderProjectSettings();
 }
 
 /** AI 面板内部的子页签 */
@@ -3759,10 +3923,21 @@ function switchAiTab(name) {
   document.querySelectorAll('.ai-tab').forEach(x => x.classList.toggle('active', x.dataset.ai === name));
   document.querySelectorAll('.ai-pane').forEach(x => x.classList.toggle('active', x.dataset.aiPane === name));
 }
-function focusLeft() {
-  $('leftPanel').scrollIntoView();
-  $('leftPanel').style.boxShadow = '0 0 0 2px var(--accent)';
-  setTimeout(() => $('leftPanel').style.boxShadow = '', 900);
+function flashPanel(el) {
+  if (!el) return;
+  el.style.boxShadow = 'inset 0 0 0 2px var(--accent)';
+  setTimeout(() => { el.style.boxShadow = ''; }, 850);
+}
+
+function focusBlocks() {
+  const el = $('blocksArea');
+  flashPanel(el);
+  $('blockCanvas')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  if (!App.paletteOpen) togglePalette();
+}
+
+function focusRightPanel() {
+  flashPanel($('rightPanel'));
 }
 
 function loadTplDialog() {
@@ -3912,6 +4087,10 @@ window.BlockAnim = {
   get audio() { return App.audio; },
   get time() { return App.time; },
   get selectedLayerId() { return App.layerId; },
+  get ui() { return { ...App.ui }; },
+
+  setTheme(theme) { applyTheme(theme); return App.ui.theme; },
+  setTimelineMode(mode) { applyTimelineMode(mode); return App.ui.tlMode; },
 
   setTime(t) {
     setPlaying(false);

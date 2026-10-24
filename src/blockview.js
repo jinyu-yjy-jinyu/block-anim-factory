@@ -433,22 +433,43 @@ function startDrag(payload, ev) {
 
   const sx = ev.clientX, sy = ev.clientY;
   let moved = false;
+  let finished = false;
+
+  /* 焦点跟随光标；不再用「从 0,0 位移」的写法，否则拖拽刚开始或鼠标
+     在窗口外松开时会留下一枚停在左上角的幽灵积木。 */
+  const follow = (e, rotate) => {
+    ghost.style.transform = `translate(${e.clientX + 12}px,${e.clientY + 8}px)${rotate ? ' rotate(1.5deg)' : ''}`;
+  };
+  follow(ev, false);
+
+  const cleanup = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    window.removeEventListener('blur', onCancel);
+    document.removeEventListener('mouseleave', onCancel);
+    document.removeEventListener('keydown', onKey);
+    ghost.remove();
+    clearHighlights();
+    releaseDropzones();
+    finished = true;
+  };
+  const onCancel = () => { if (!finished) cleanup(); };
+  const onKey = (e) => { if (e.key === 'Escape') onCancel(); };
 
   const onMove = (e) => {
+    if (finished) return;
     const dx = e.clientX - sx, dy = e.clientY - sy;
     if (!moved && Math.hypot(dx, dy) < 4) return;
     if (!moved) captureDropzones();   // 首次真正拖动时取一次快照
     moved = true;
-    ghost.style.transform = `translate(${dx}px,${dy}px) rotate(1.5deg)`;
+    follow(e, true);
     highlightDrop(e);
   };
   const onUp = (e) => {
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    ghost.remove();
-    clearHighlights();
-    releaseDropzones();
-    if (!moved) {
+    if (finished) return;
+    const wasMoved = moved;
+    cleanup();
+    if (!wasMoved) {
       const id = payload.kind === 'move' ? payload.id : null;
       S.selected = id;
       markSelected();
@@ -460,6 +481,11 @@ function startDrag(payload, ev) {
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
+  /* 鼠标拖出窗口后松手，document 收不到 mouseup；失焦/离开页面时收尾，
+     避免幽灵块和 dropzone 高亮一直挂在界面上。 */
+  window.addEventListener('blur', onCancel);
+  document.addEventListener('mouseleave', onCancel);
+  document.addEventListener('keydown', onKey);
 }
 
 function findBlockLabel(id) {
