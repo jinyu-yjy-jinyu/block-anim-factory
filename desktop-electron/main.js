@@ -183,6 +183,23 @@ if (!gotLock) {
       return;
     }
 
+    // ---- 导航白名单 ----
+    // 页面只应停留在本地服务上。一旦被导航到外部站点，远端页面会继承
+    // preload 暴露的 desktopBridge.saveAs，等于把写盘对话框交给陌生网页。
+    // 外部链接一律交给系统浏览器。
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+      try {
+        const target = new URL(url);
+        if (target.origin === new URL(server.url).origin) return;
+        event.preventDefault();
+        if (target.protocol === 'http:' || target.protocol === 'https:') {
+          shell.openExternal(url);
+        }
+      } catch {
+        event.preventDefault();
+      }
+    });
+
     // ---- 加载 ----
     mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
       showErrorPage(mainWindow,

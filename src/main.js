@@ -652,15 +652,8 @@ function renderGitLog() {
           el2('button', {
             style: 'margin-top:5px',
             onClick: () => {
-              pushUndo();
-              App.ir = clone(r.ir);
-              BV.S.ir = App.ir;
-              App.layerId = App.ir.layers[0].id; BV.S.layerId = App.layerId;
-              if (App.sceneTree) App.sceneTree.syncFromLayers(App.ir.layers);
-              if (App.audioSource) App.audioSource.setNominalDuration(App.ir.project.duration);
-              syncSubtitlePanel(App.ir);
-              syncProjectToUI(); renderLayerTree(); BV.renderBlocks(); renderInspector();
-              renderProjectSettings(); buildRuler(); layoutStage(); drawFrame();
+              App.loadIR(clone(r.ir));
+              App.title = App.ir.project.name || App.title;
               toast(`已载入 ${r.shortHash}`, 'ok');
             },
           }, '载入到当前工程'),
@@ -691,6 +684,9 @@ function gitCheckout() {
   if (!name) return;
   try {
     App.repo.checkout(name);
+    // 切分支必须把该分支的最新版本载入画布，否则看到的还是上一个分支的内容
+    const rev = App.repo.get(App.repo.head(name));
+    if (rev) App.loadIR(clone(rev.ir));
     renderGitLog();
     toast(`已切到分支「${name}」`, 'ok');
   } catch (e) { toast(e.message, 'err'); }
@@ -726,6 +722,8 @@ function gitMerge(branchName) {
   box.innerHTML = '';
 
   if (r.ok) {
+    // 合并结果已经提交进版本库，画布也要切到这份结果
+    if (r.merged) App.loadIR(clone(r.merged));
     const okd = el2('div', { class: 'ok', style: 'color:#38c98b' },
       `✓ 已合并「${branchName}」，生成 ${r.revision.shortHash}`);
     box.appendChild(okd);
@@ -755,6 +753,7 @@ function gitMerge(branchName) {
       onClick: () => {
         const r2 = App.repo.merge(branchName, { force: true, author: '我' });
         if (r2.ok) {
+          if (r2.merged) App.loadIR(clone(r2.merged));
           box.innerHTML = '';
           box.appendChild(el2('div', { class: 'ok', style: 'color:#38c98b' }, `✓ 已强制合并，生成 ${r2.revision.shortHash}`));
           renderGitLog();
@@ -957,7 +956,8 @@ function aiStoryboardApply() {
 function aiFromSubs() {
   const track = App.subPanel.track;
   if (!track.cues.length) { toast('先在「字幕」页导入或新增字幕', 'warn'); return; }
-  const r = AI.subtitlesToBlocks(track, { layer: currentLayer() ? currentLayer().name : '标题文字' });
+  const layer = currentLayer();
+  const r = AI.subtitlesToBlocks(track, { layer: layer ? layer.name : '标题文字' });
   const out = $('aiSubResult');
   if (out) {
     out.innerHTML = '';
@@ -969,9 +969,15 @@ function aiFromSubs() {
       ]));
     }
   }
-  // 标记点也写进工程
-  App.ir.markers = (App.ir.markers || []).concat(r.markers.map(m => ({ name: m.name, time: m.time, label: m.label })));
-  buildRuler();
+  // 生成结果要真正挂到当前图层的逻辑上，只显示在面板里等于没生成
+  pushUndo();
+  if (layer) layer.blocks = (layer.blocks || []).concat(clone(r.blocks));
+  // 标记点需要保留 id（时间轴/求值器按 id 查找），不能只存 name
+  App.ir.markers = (App.ir.markers || []).concat(r.markers.map(m => ({
+    id: m.id, name: m.name, time: m.time, label: m.label, color: m.color || '#ffb020',
+  })));
+  markDirty();
+  renderLayerTree(); BV.renderBlocks(); renderInspector(); buildRuler(); drawFrame();
   if (App.repo) App.repo.commit(App.ir, `按字幕生成 ${r.blocks.length} 个动画`, { author: '我' });
   toast(`已生成 ${r.blocks.length} 个积木与 ${r.markers.length} 个标记点`, 'ok');
 }
@@ -1060,6 +1066,14 @@ function aiExplainAll() {
     el2('div', { style: 'font-size:12px;line-height:2' },
       lines.map(l => el2('div', { style: 'margin:4px 0' }, l))),
   ], [{ label: '知道了', cls: '' }]);
+}
+
+/** 新建/载入/切分支时清空上一份真实音轨，避免新工程沿用旧工程的音频 */
+function resetAudioState() {
+  App.audioTracks = [];
+  if (App.audioDesk) App.audioDesk.setTracks(App.audioTracks);
+  syncAudioSource();
+  renderAudioStatus();
 }
 
 /** 有真实音频时用真实音源，否则用合成音源 */
@@ -1400,6 +1414,12 @@ function renderLayerTree() {
       e.stopPropagation();
       pushUndo();
       l.visible = !l.visible;
+      if (App.sceneTree) {
+        const n = App.sceneTree.find(l.id);
+        if (n) n.visible = l.visible;
+        // 重新扁平化，保证组隐藏时子图层不会因手动开关而“漏出来”
+        syncSceneToIR();
+      }
       renderLayerTree(); drawFrame(); markDirty();
     });
     const nm = document.createElement('span');
@@ -1463,6 +1483,8 @@ function renderGroupsInto(tree) {
     eye.addEventListener('click', (e) => {
       e.stopPropagation();
       node.visible = !node.visible;
+      // 组的可见性要写进 IR，否则保存/导出时丢失
+      syncSceneToIR();
       renderLayerTree(); drawFrame(); markDirty();
     });
     row.appendChild(eye);
@@ -1597,6 +1619,14 @@ function renderLayerProps() {
 function setProp(l, k, v) {
   pushUndo();
   l.props[k] = v;
+  if (k === 'opacity' && App.sceneTree) {
+    const n = App.sceneTree.find(l.id);
+    if (n && !n.isGroup) {
+      n.opacity = v;
+      // 立即重新扁平化，否则组的不透明度倍率会被这次单层修改暂时覆盖
+      syncSceneToIR();
+    }
+  }
   drawFrame();
   markDirty();
 }
@@ -2019,6 +2049,7 @@ function newProject() {
   pushUndo();
   App.ir = defaultProject('新建工程');
   App.audio = defaultAudio(App.ir);
+  resetAudioState();
   App.layerId = App.ir.layers[1].id;
   App.time = 0;
   BV.S.ir = App.ir; BV.S.layerId = App.layerId;
@@ -2062,6 +2093,7 @@ $('fileInput').addEventListener('change', async (e) => {
     pushUndo();
     App.ir = ir;
     App.audio = defaultAudio(ir);
+    resetAudioState();
     App.layerId = ir.layers[0] && ir.layers[0].id;
     App.time = 0;
     BV.S.ir = ir; BV.S.layerId = App.layerId;
@@ -2094,7 +2126,7 @@ function setExportProgress(p, info) {
 async function doExportPNG() {
   showExportUI('导出当前帧 PNG');
   try {
-    const blob = await EX.exportPNG(App.ir, App.audio, App.time);
+    const blob = await EX.exportPNG(App.ir, App.audioSource || App.audio, App.time);
     EX.download(blob, `${App.ir.project.name}_${fmtTime(App.time).replace(':', '-')}.png`);
     setExportProgress(1, '完成');
     toast('PNG 已导出', 'ok');
@@ -2173,15 +2205,21 @@ async function doExportVideo() {
         // 不是 {samples, sampleRate}。而且 duration 是必需参数：
         // 漏传会让 Math.ceil(undefined * sr) 得到 NaN，整段抛错，
         // 被下面的 catch 吞掉 → 导出看起来成功，实际永远是无声版本。
-        const audioDuration = Math.max(
-          (to - from) || ir.project.duration,
+        const sampleRate = 48000;
+        const fullDuration = Math.max(
+          to,
           ...App.audioTracks.map(tr => (tr.start || 0) + (tr.samples.length / (tr.sampleRate || 48000))),
         );
-        const mixed = mixTracks(App.audioTracks, audioDuration, { sampleRate: 48000 });
+        const mixed = mixTracks(App.audioTracks, fullDuration, { sampleRate });
         if (!mixed || !mixed.length) {
           throw new Error('混音结果为空');
         }
-        const res = await exportWithAudio(blob, mixed, 48000, {});
+        // 导出区间不是从 0 开始时，音轨必须同步裁到 [from, to]，否则音画错位
+        const startSample = Math.max(0, Math.round(from * sampleRate));
+        const endSample = Math.min(mixed.length, Math.round(to * sampleRate));
+        const clip = mixed.slice(startSample, endSample);
+        if (!clip.length) throw new Error('所选区间内没有音频');
+        const res = await exportWithAudio(blob, clip, sampleRate, {});
         if (res && res.muxed) { outBlob = res.video; toast('视频与音频已合成', 'ok'); }
         else if (res && res.audio) {
           EX.download(blob, '无声成片.mp4');
@@ -2469,7 +2507,24 @@ function syncSceneToIR() {
   if (!App.sceneTree) return;
   // 记下积木（扁平化会重建对象，不能丢）
   const blocksById = new Map();
-  for (const l of App.ir.layers) blocksById.set(l.id, l.blocks);
+  for (const l of App.ir.layers) {
+    blocksById.set(l.id, l.blocks);
+    // 属性面板可能改过名称/属性而场景树还停在旧值，先同步叶子节点。
+    // 不透明度例外：它以节点自身的 opacity 为准（组倍率在 toLayers 时才乘），
+    // 否则会把上次生成的组倍率当成图层属性反复相乘。
+    const n = App.sceneTree.find(l.id);
+    if (n && !n.isGroup) {
+      n.name = l.name;
+      n.locked = !!l.locked;
+      // IR 的 circle ↔ 场景树的 ellipse，类型改了也要带过去
+      const nodeType = { text: 'text', rect: 'rect', circle: 'ellipse', image: 'image' }[l.type];
+      if (nodeType) n.type = nodeType;
+      const props = Object.assign({}, l.props);
+      delete props.opacity;
+      n.props = Object.assign({}, n.props, props);
+      n.blocks = l.blocks || [];
+    }
+  }
 
   const flat = App.sceneTree.toLayers();
   for (const l of flat) {
@@ -3007,6 +3062,7 @@ function doAction(act) {
     /* ---------- V3/V4：版本 ---------- */
     case 'git.commit': gitCommit(); break;
     case 'git.branch': gitNewBranch(); break;
+    case 'git.newBranch': gitNewBranch(); break;
     case 'git.checkout': gitCheckout(); break;
     case 'git.tag': gitTag(); break;
     case 'git.export': gitExport(); break;
@@ -3215,6 +3271,7 @@ window.BlockAnim = {
     if (!t) throw new Error('未知模板：' + key);
     App.ir = t.make();
     App.audio = defaultAudio(App.ir);
+    resetAudioState();
     App.layerId = App.ir.layers[1] ? App.ir.layers[1].id : App.ir.layers[0].id;
     App.time = 0;
     BV.S.ir = App.ir; BV.S.layerId = App.layerId;
@@ -3230,6 +3287,7 @@ window.BlockAnim = {
     pushUndo();
     App.ir = ir;
     App.audio = defaultAudio(ir);
+    resetAudioState();
     App.layerId = ir.layers[0] && ir.layers[0].id;
     App.time = 0;
     BV.S.ir = ir; BV.S.layerId = App.layerId;
@@ -3242,7 +3300,7 @@ window.BlockAnim = {
 
   /* 离屏渲染单帧并返回 Blob（供批渲染队列复用） */
   async renderFramePNG(time, scale = 1) {
-    return EX.exportPNG(App.ir, App.audio, time);
+    return EX.exportPNG(App.ir, App.audioSource || App.audio, time, scale);
   },
 
   /* 批渲染：同一份模板套多份数据，逐行产出 */

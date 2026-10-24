@@ -116,7 +116,7 @@ export function validate(ir) {
   if (errs.length) return errs;
   if (!(ir.project.fps > 0)) errs.push('fps 必须为正数');
   if (!(ir.project.duration > 0)) errs.push('duration 必须为正数');
-  if (ir.markers.length !== (ir.markers || []).length) errs.push('markers 必须是数组');
+  if (ir.markers != null && !Array.isArray(ir.markers)) errs.push('markers 必须是数组');
   for (const m of ir.markers || []) {
     if (!(m.time >= 0)) errs.push(`标记点「${m.label}」时间非法`);
   }

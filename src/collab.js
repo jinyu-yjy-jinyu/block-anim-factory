@@ -261,8 +261,10 @@ export class Repo {
       const bl = baseLayers.get(id);
 
       if (!tl) {
+        // base 里没有 → 这是我方新增的图层，对方分支还没见过，必须保留
+        if (!bl) continue;
         // theirs 删了：ours 没改就跟着删，改了就当冲突
-        if (!bl || sameLayer(bl, ol)) {
+        if (sameLayer(bl, ol)) {
           merged.layers = merged.layers.filter(x => x.id !== id);
           taken.push({ kind: 'layerDeleted', layerId: id, name: ol.name });
         } else {

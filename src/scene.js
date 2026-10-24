@@ -401,6 +401,9 @@ export class SceneTree {
         // IR 里没有 visible 字段 = 可见；只有显式 false 才隐藏
         visible: l.visible !== false,
         locked: !!l.locked,
+        // 图层自身的不透明度单独记在节点上，组的倍率在导出时再乘，
+        // 这样反复同步不会把组的 50% 一层层烙进图层属性里。
+        opacity: typeof l.props.opacity === 'number' ? l.props.opacity : 1,
         props: Object.assign({}, l.props),
         blocks: l.blocks || [],
       });
@@ -410,20 +413,34 @@ export class SceneTree {
   }
 
   /**
-   * 导出回扁平图层列表（保持与旧渲染管线兼容）
-   * visible 保持节点自身的值（用户手动隐藏要保留），
-   * 但**不叠加**组的隐藏 —— 那是渲染时逐帧的事。
+   * 导出回扁平图层列表（保持与旧渲染管线兼容）。
+   * 组的隐藏与不透明度在这里向下传递并乘进子图层：
+   * visible = 组可见 && 图层可见，props.opacity = 组倍率 × 图层自身不透明度。
+   * 与 flatRenderList 不同，这里**不丢弃**隐藏或全透明的图层 ——
+   * 它们仍要留在 IR 里供用户重新显示。
    */
   toLayers() {
-    return this.flatRenderList().map(({ node, opacity }) => ({
-      id: node.id,
-      name: node.name,
-      type: LAYER_TYPE_INV[node.type] || 'rect',
-      visible: node.visible,
-      locked: node.locked,
-      props: Object.assign({}, node.props),
-      blocks: node.blocks,
-    }));
+    const out = [];
+    const walk = (node, inheritVisible, inheritOpacity) => {
+      const visible = inheritVisible && node.visible;
+      if (node.isGroup) {
+        const op = inheritOpacity * (node.opacity == null ? 1 : node.opacity);
+        for (const c of node.children) walk(c, visible, op);
+        return;
+      }
+      const own = node.opacity == null ? 1 : node.opacity;
+      out.push({
+        id: node.id,
+        name: node.name,
+        type: LAYER_TYPE_INV[node.type] || 'rect',
+        visible,
+        locked: node.locked,
+        props: Object.assign({}, node.props, { opacity: own * inheritOpacity }),
+        blocks: node.blocks,
+      });
+    };
+    walk(this.root, true, 1);
+    return out;
   }
 }
 

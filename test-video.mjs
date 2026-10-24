@@ -188,6 +188,19 @@ t('音源:轨道起点偏移生效', () => {
   eq(s.amplitude(0.5), 0, '偏移前不应有声');
   ok(s.amplitude(1.8) > 0.1, '偏移后应有声');
 });
+t('音源:非 60fps 工程的频段索引按时间换算', () => {
+  // 分析结果固定按 60fps 生成，AudioSource 的输出数组按项目 fps 索引。
+  // 原实现直接拿 i 取 bands[i]，30fps 工程会把 1.0s 读成 0.5s 的能量，
+  // 整条音频驱动的时间轴快一倍。
+  const tr = speechTrack(4);
+  const s30 = AS.AudioSource.fromTracks([tr], { fps: 30 });
+  const s60 = AS.AudioSource.fromTracks([tr], { fps: 60 });
+  const at1s = s60.amplitude(1.0);
+  ok(at1s > 0.1, '基准点 1.0s 应有声');
+  near(s30.amplitude(1.0), at1s, 0.05, '30fps 工程 1.0s 的能量应与 60fps 一致');
+  near(s30.amplitude(2.5), s60.amplitude(2.5), 0.05, '30fps 工程 2.5s 的能量应与 60fps 一致');
+  ok(s30.amplitude(0.2) < 0.05, '静音段被错位读成了有声');
+});
 t('音源:挂载词级时间码', () => {
   const tr = speechTrack(2);
   AS.attachWordTimings(tr, [{ word: '你', start: 0.6, end: 0.9 }, { word: '好', start: 0.9, end: 1.2 }]);
@@ -346,6 +359,61 @@ t('导出:帧率与区间非法时 total 为 0', () => {
   const ir = TP.loadTemplate('popTitle');
   const src = new VE.FrameSource(ir, null, { fps: 24, from: 2, to: 1 });
   eq(src.total, 0);
+});
+t('导出:H.264/H.265 级别按分辨率选择', () => {
+  // 回归：固定 avc1.42001f（Baseline 3.1）装不下 1080p（8160 宏块 > 3600）。
+  eq(VE.webCodecsCodecString('h264', 1280, 720, 30), 'avc1.64001f', '720p30');
+  eq(VE.webCodecsCodecString('h264', 1920, 1080, 30), 'avc1.640028', '1080p30 应选 4.0');
+  eq(VE.webCodecsCodecString('h264', 3840, 2160, 30), 'avc1.640033', '4K30 应选 5.1');
+  ok(/L120/.test(VE.webCodecsCodecString('h265', 1920, 1080, 30)), '1080p30 应选 HEVC 4.0');
+  ok(/L153/.test(VE.webCodecsCodecString('h265', 3840, 2160, 60)), '4K60 应选 HEVC 5.1');
+});
+t('导出:HEVC 封装写入 hvc1/hvcC 而不是 avc1/avcC', () => {
+  // 回归：muxMP4 以前不认编码类型，H.265 也被塞进 avc1 + avcC，
+  // 播放器按 AVC 解析 HEVC 码流，元数据能读、画面出不来。
+  const chunks = [
+    { type: 'key', delta: 3000, description: new Uint8Array([1, 2, 3, 4, 5]), data: new Uint8Array(16) },
+    { type: 'delta', delta: 3000, description: null, data: new Uint8Array(8) },
+  ];
+  const hevc = VE.muxMP4ForTest({ chunks, width: 320, height: 180, fps: 30, codec: 'hev1.1.6.L93.B0' });
+  eq(hevc.sampleEntry, 'hvc1', 'HEVC 样本条目');
+  eq(hevc.configBox, 'hvcC', 'HEVC 配置盒');
+  ok(hevc.verify.hasHvcC, 'hvcC 缺失');
+  ok(hevc.verify.ok, 'HEVC 封装自检失败：'
+    + hevc.verify.checks.filter(c => !c.pass).map(c => c.name).join('；')
+    + (hevc.verify.errors.length ? ' / ' + hevc.verify.errors.join('；') : ''));
+  const buf = Buffer.from(hevc.bytes);
+  ok(buf.includes(Buffer.from('hvc1')), '文件里没有 hvc1 标记');
+  ok(!buf.includes(Buffer.from('avc1')), 'HEVC 文件里仍出现 avc1');
+
+  const avc = VE.muxMP4ForTest({ chunks, width: 320, height: 180, fps: 30, codec: 'avc1.64001f' });
+  eq(avc.sampleEntry, 'avc1');
+  ok(avc.verify.hasAvcC, 'AVC 的 avcC 丢失');
+});
+t('导出:GIF 默认不做抖动', () => {
+  // Bayer 抖动会在纯色/渐变上叠出可见噪点，默认应保持干净；
+  // 需要抖动时由调用方显式传 dither:true。
+  const W = 32, H = 24;
+  return (async () => {
+    const GIF = await import(U('src/gif.js'));
+    const frames = [{ rgba: memFrame(W, H, 0), delay: 5 }];
+    const a = Buffer.from(await (await GIF.encodeGIF(frames, W, H)).arrayBuffer());
+    const b = Buffer.from(await (await GIF.encodeGIF(frames, W, H, { dither: false })).arrayBuffer());
+    ok(a.equals(b), '默认输出与 dither:false 不一致 —— 默认值又打开了');
+  })();
+});
+t('导出:GIF 延时按累计时间取整', () => {
+  // 30fps 每帧固定 3cs，一秒只有 90cs（快 10%）；60fps 每帧 2cs
+  // 又变成 120cs（慢 20%）。累计取整后一秒必须仍是 100cs。
+  for (const fps of [24, 25, 30, 50]) {
+    let total = 0;
+    for (let i = 0; i < fps; i++) total += VE.gifDelayCs(fps, i);
+    near(total, 100, 0.0001, `${fps}fps 一秒的延时总和`);
+  }
+  // 超过 50fps 时受 GIF 最小 2cs 限制，但绝不能低于 2
+  for (const fps of [60, 120]) {
+    for (let i = 0; i < 10; i++) ok(VE.gifDelayCs(fps, i) >= 2, `${fps}fps 第 ${i} 帧延时低于 2cs`);
+  }
 });
 
 /* WebM 是唯一「按真实墙钟采集」的导出路径：MediaRecorder 给

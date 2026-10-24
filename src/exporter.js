@@ -55,9 +55,12 @@ function download(blob, name) {
 }
 
 /* ---------- 单帧 PNG ---------- */
-export async function exportPNG(ir, audio, t) {
-  const c = offscreen(ir.project.width, ir.project.height);
-  drawFrame(ir, audio, t, c, 1, {});
+export async function exportPNG(ir, audio, t, scale = 1) {
+  const c = offscreen(
+    Math.round(ir.project.width * scale),
+    Math.round(ir.project.height * scale),
+  );
+  drawFrame(ir, audio, t, c, scale, {});
   return toBlob(c, 'image/png');
 }
 

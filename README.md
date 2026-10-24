@@ -15,7 +15,7 @@
 
 ```bash
 npm start            # 起本地服务 → http://localhost:5173
-npm test             # 跑全部测试（12 个套件）
+npm test             # 跑全部测试（13 个套件）
 npm run screenshots  # 生成界面截图到 screenshots/
 ```
 
@@ -68,19 +68,20 @@ npm run desktop:build   # → desktop/out/积木动画工厂.exe
 npm run desktop:test    # 跑桌面版冒烟测试
 ```
 
-GitHub Actions 会在每次推 main 时自动构建 EXE 并上传产物；推 `v*` 标签时发布正式发行版。
+GitHub Actions 会在每次推 main 时构建桌面产物；当 `package.json` 版本号对应一个新标签时，
+自动创建发行版，并把 Windows / macOS / Linux 产物挂上去。
 
-### Electron 桌面壳（开发中）
+### Electron 桌面壳（跨平台）
 
-WPF 壳只能跑 Windows；为了将来覆盖 macOS，还有一套 Electron 壳（`desktop-electron/`），
+WPF 壳只能跑 Windows；Electron 壳（`desktop-electron/`）覆盖 Windows / macOS / Linux，
 与 WPF 壳共用同一份 Web 应用，界面与功能完全一致。
 
 | | WPF 壳（`desktop/`） | Electron 壳（`desktop-electron/`） |
 |---|---|---|
-| 平台 | 仅 Windows | Windows / macOS（计划） |
+| 平台 | 仅 Windows | Windows / macOS / Linux |
 | 自带运行时 | .NET 8 自包含（约 140 MB） | Electron（体积相近） |
 | 本地服务 | C# 裸 `TcpListener` | Node `http`，与网页版共用同一份实现 |
-| 状态 | 已发布（安装版 + 便携版） | 开发中：未接线 CI、未随 Release 发布 |
+| 状态 | 已发布（安装版 + 便携版） | 已发布（三平台构建，自动挂到发行版） |
 
 核心文件：
 
@@ -252,7 +253,7 @@ npm run test:server    # 跑服务安全测试
 
 ## 测试
 
-`npm test` 依次跑 12 个套件，共 **558 项纯逻辑断言**，另含真实 Chromium 驱动的端到端与像素级画面断言：
+`npm test` 依次跑 13 个套件，含数百项纯逻辑断言，另含真实 Chromium 驱动的端到端与像素级画面断言：
 
 | 套件 | 覆盖内容 |
 |---|---|
@@ -290,10 +291,8 @@ npm run test:server    # 跑服务安全测试
 - **旧工程的「粒子与重复器」参数可能不对**：「粒子与重复器」模板自首个公开版本起
   即为坏的（粒子不动、重复条没有高度），本版已修正模板本身。用旧版本模板保存过的
   工程需重新配置这两个积木的参数，后续版本提供自动迁移。
-- **GIF 导出颜色偏色**：调色板大小与压缩码宽已修，但整体色差仍超标，根因排查中。
-  PNG 序列帧与 MP4 不受影响。
-- **积木嵌套过深时画面会静默停住**：为防止界面卡死加了帧内步数上限，
-  超限时本帧到此为止，界面暂无提示。
+- **积木嵌套过深时画面会停在当帧**：为防止界面卡死加了帧内步数上限，
+  超限时本帧截断并弹出提示；简化嵌套后恢复。
 - **音频不随版本回滚**：音频轨道不作版本快照，回滚到旧版本时画面与字幕回退、音频保持当前状态。
 - 本项目刚开源，尚未经过真实使用验证。以上已知问题可能在日常使用中还会增加，
   欢迎到 Issues 反馈。
@@ -343,7 +342,7 @@ src/
 
   # —— 导出 ——
   video-export.js           MP4(WebCodecs/ffmpeg) / GIF / PNG序列 / WebM
-  gif.js                    自包含 GIF89a 编码器（5-5-5 量化 + 有序抖动 + LZW）
+  gif.js                    自包含 GIF89a 编码器（5-5-5 量化 + 可选有序抖动 + LZW）
   zip.js                    极简 ZIP（CompressionStream deflate-raw）
 
   styles.css                基础样式
@@ -377,7 +376,7 @@ desktop/MainWindow.xaml     窗口与启动占位
 desktop/SmokeTest.cs        冒烟测试（--smoke，不开窗口）
 desktop/installer.iss       Inno Setup 安装包脚本（安装包文件名用纯 ASCII）
 
-  # —— Electron 桌面壳（开发中）——
+  # —— Electron 桌面壳（跨平台）——
 desktop-electron/main.js      Electron 主进程：起服务 → 建窗口 → 失败显示可读错误页
 desktop-electron/preload.js   contextBridge 白名单：isDesktop / platform / saveAs
 desktop-electron/server.mjs   本地静态服务实现（网页版与 Electron 版共用）
@@ -542,7 +541,7 @@ await BlockAnim.batchRender(
 | 提交数 / 跟踪文件 | 13 个提交 / 91 个文件 |
 | 应用代码 | `src/` 34 个文件、约 16,200 行（其中 `main.js` 3,269 行） |
 | 测试代码 | 13 个 `test-*.mjs` + `run-tests.mjs`，约 6,270 行 |
-| 桌面壳 | WPF 约 1,010 行（已发布）；Electron 约 894 行（开发中） |
+| 桌面壳 | WPF 约 1,010 行（已发布）；Electron 约 894 行（已发布，三平台） |
 | 运行时依赖 | 仅测试用 `playwright-core`；无构建步骤 |
 
 **工作区改动（2026-10-18 快照，现已并入 main）**
@@ -559,11 +558,11 @@ await BlockAnim.batchRender(
 1. ~~Electron 安全测试硬编码本机绝对路径~~：已改为相对导入，CI 可直接执行。
 2. ~~`ci.yml` 源码打包清单缺 `desktop-electron`~~：已补入打包清单。
 3. ~~Electron 壳未接线 CI~~：`desktop-electron.yml` 已覆盖三平台打包、冒烟与安全测试。
-4. ~~版本号三处手工同步~~：`check-version.mjs` 已覆盖四处（含 `desktop-electron/package.json`），版本升至 0.4.2。
-5. **孤儿测试**：`test-gif.mjs`、`test-mp4.mjs` 仍未接入 12 套件主流程，需单独运行。
+4. ~~版本号三处手工同步~~：`check-version.mjs` 已覆盖四处（含 `desktop-electron/package.json`），版本升至 0.4.3。
+5. **孤儿测试**：`test-mp4.mjs` 仍未接入 13 套件主流程，需单独运行；`test-gif.mjs` 已并入。
 6. ~~npm scripts 不全~~：`test:markdirty`、`test:renderer-img` 已补。
 
-**抽样验证**：`npm test` → 12 套件全部通过、无跳过（2026-10-24）。
+**抽样验证**：`npm test` → 13 套件全部通过、无跳过（2026-10-24）。
 
 ---
 

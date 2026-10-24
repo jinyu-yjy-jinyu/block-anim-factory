@@ -161,6 +161,29 @@ t('字幕:补齐逐词时间码', () => {
   ok(w[w.length - 1].end <= tr.cues[0].end + 0.01, '词超出字幕区间');
   eq(w.map(x => x.word).join(''), tr.cues[0].text, '拼接应还原原文');
 });
+t('字幕:逐词时间码按累计权重铺满', () => {
+  // 回归：原实现拿 tokens 下标当权重、又拿同一个下标算时间比例，
+  // 「你好世界」第二个词从 0.25 开始（应为 0.5），词之间互相重叠/留缝。
+  const c = new SUB.SubtitleCue({ start: 1, end: 3, text: '你好世界' });
+  const w = SUB.distributeWords(c);
+  eq(w.length, 4);
+  near(w[0].start, 1, 1e-9);
+  near(w[0].end, 1.5, 1e-9);
+  near(w[1].start, 1.5, 1e-9);
+  near(w[3].end, 3, 1e-9);
+  for (let i = 1; i < w.length; i++) near(w[i].start, w[i - 1].end, 1e-9, `第 ${i} 个词与前词不连续`);
+});
+t('字幕:毫秒/厘秒边界正确进位', () => {
+  // 回归：0.9996 原实现输出 `00:00:00,1000`（毫秒 4 位）、ASS `.100`（厘秒 3 位）。
+  const tr = new SUB.SubtitleTrack();
+  tr.add(new SUB.SubtitleCue({ start: 0.9996, end: 1.9996, text: 'x' }));
+  const srt = SUB.toSRT(tr);
+  ok(/00:00:01,000 --> 00:00:02,000/.test(srt), 'SRT 未正确进位：' + srt.split('\n')[1]);
+  const vtt = SUB.toVTT(tr);
+  ok(/00:00:01\.000 --> 00:00:02\.000/.test(vtt), 'VTT 未正确进位：' + vtt.split('\n')[2]);
+  const ass = SUB.toASS(tr);
+  ok(/0:00:01\.00,0:00:02\.00/.test(ass), 'ASS 未正确进位：' + (ass.match(/Dialogue:.*/) || [''])[0]);
+});
 t('字幕:cueAnchors 供锚点积木使用', () => {
   const tr = mkTrack();
   const a = SUB.cueAnchors(tr);

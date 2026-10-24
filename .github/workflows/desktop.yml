@@ -239,19 +239,44 @@ jobs:
       - name: 确定标签
         run: echo "TAG=v$(node -p "require('./package.json').version")" >> $GITHUB_ENV
 
+      # 与 ci.yml 的 release job 并发运行。发行版还没建好时，
+      # action-gh-release 会新建一个空发行版并抢先打 tag，导致
+      # ci.yml 跳过发版、发行说明丢失。先等真正的发行版出现；
+      # 等不到就跳过挂载，绝不创建空发行版。
+      - name: 等待网页版发行版
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || env.TAG }}"
+          for i in $(seq 1 90); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "exists=true" >> $GITHUB_OUTPUT
+              echo "发行版 $TAG 已就绪"
+              exit 0
+            fi
+            echo "等待发行版 $TAG（$i/90）…"
+            sleep 10
+          done
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "::warning::15 分钟内没有等到发行版 $TAG，跳过挂载（不会创建空发行版）"
+
       - name: 下载 zip
+        if: steps.wait.outputs.exists == 'true'
         uses: actions/download-artifact@v4
         with:
           name: 积木动画工厂-Windows
           path: dist
 
       - name: 下载安装包
+        if: steps.wait.outputs.exists == 'true'
         uses: actions/download-artifact@v4
         with:
           name: block-anim-factory-installer
           path: dist
 
-      - name: 挂到已有的发行版（没有就跳过）
+      - name: 挂到已有的发行版
+        if: steps.wait.outputs.exists == 'true'
         uses: softprops/action-gh-release@v2
         with:
           # 只指定 tag_name，不给 name/body：

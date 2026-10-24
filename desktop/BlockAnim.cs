@@ -20,6 +20,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -83,6 +84,11 @@ public partial class BlockAnim : Window
     {
         try
         {
+            // 重试时会再次走到这里。不先停掉上一次的监听器，
+            // 每点一次「重试」就会多一个端口和一条后台线程。
+            try { _tcp?.Stop(); } catch { }
+            _tcp = null;
+
             Log("开始启动");
 
             // 1) 释放 Web 资源
@@ -95,6 +101,15 @@ public partial class BlockAnim : Window
             Log($"本地服务已启动 http://{Host}:{_port}/");
 
             // 3) 装 WebView2
+            // 重试时 WebView2 可能已经初始化过；此时必须复用，
+            // 用一个新环境再调 EnsureCoreWebView2Async 会直接抛异常。
+            if (WebView.CoreWebView2 != null)
+            {
+                Log("复用已初始化的 WebView2，重新导航");
+                WebView.CoreWebView2.Navigate($"http://{Host}:{_port}/");
+                return;
+            }
+
             var env = await CoreWebView2Environment.CreateAsync(null, UserDataDir());
             Log("WebView2 环境创建成功");
 
@@ -123,11 +138,20 @@ public partial class BlockAnim : Window
         core.Settings.AreDevToolsEnabled = true;
         core.Settings.IsZoomControlEnabled = true;
 
-        // 新窗口在当前窗口里打开，不要弹出一个没头没尾的浏览器
+        // 新窗口一律不开在应用内：外部链接交给系统浏览器，
+        // 否则远端页面会继承本地页面的运行环境（与 Electron 壳同一原则）。
         core.NewWindowRequested += (s, args) =>
         {
             args.Handled = true;
-            core.Navigate(args.Uri);
+            OpenExternal(args.Uri);
+        };
+
+        // 页面内的直接跳转同样限制在本地服务，防止被拖入链接带离应用。
+        core.NavigationStarting += (s, args) =>
+        {
+            if (IsLocalUrl(args.Uri) || args.Uri == "about:blank") return;
+            args.Cancel = true;
+            OpenExternal(args.Uri);
         };
 
         // 导出走浏览器 Blob 下载，交给系统默认程序即可
@@ -157,6 +181,30 @@ public partial class BlockAnim : Window
         };
 
         core.Navigate(url);
+    }
+
+    /// <summary>是不是本实例的本地页面</summary>
+    private bool IsLocalUrl(string uri)
+    {
+        return Uri.TryCreate(uri, UriKind.Absolute, out var u)
+            && u.Scheme == Uri.UriSchemeHttp
+            && string.Equals(u.Host, Host, StringComparison.OrdinalIgnoreCase)
+            && u.Port == _port;
+    }
+
+    /// <summary>外部链接交给系统默认浏览器；非 http(s) 一律丢弃</summary>
+    private static void OpenExternal(string uri)
+    {
+        try
+        {
+            if (!Uri.TryCreate(uri, UriKind.Absolute, out var u)) return;
+            if (u.Scheme != Uri.UriSchemeHttp && u.Scheme != Uri.UriSchemeHttps) return;
+            Process.Start(new ProcessStartInfo(u.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Log("打开外部链接失败：" + ex.Message);
+        }
     }
 
     /// <summary>显示启动失败 UI，并把 LoadingPanel 留在可见状态（不要藏掉它）</summary>
@@ -231,6 +279,9 @@ public partial class BlockAnim : Window
         // （renderer.js），单点无法区分。所以约定「双点」代表一层目录
         // （见 csproj 里的 LogicalName 写法）。
         var rootFull = Path.GetFullPath(root);
+        var rootPrefix = rootFull.EndsWith(Path.DirectorySeparatorChar)
+            ? rootFull
+            : rootFull + Path.DirectorySeparatorChar;
         var written = 0;
 
         foreach (var name in asm.GetManifestResourceNames())
@@ -243,8 +294,11 @@ public partial class BlockAnim : Window
             try { dest = Path.GetFullPath(Path.Combine(root, rel)); }
             catch { continue; }
 
-            // 防目录穿越
-            if (!dest.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+            // 防目录穿越。必须带结尾分隔符比较：
+            // 只比较 "C:\...\web-abc" 的话，"C:\...\web-abcdef\x"
+            // 也会被当成根内路径放行。
+            if (!dest.Equals(rootFull, StringComparison.OrdinalIgnoreCase) &&
+                !dest.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
             {
                 Log($"跳过可疑资源名：{name}");
                 continue;
@@ -290,16 +344,35 @@ public partial class BlockAnim : Window
         catch { }
     }
 
-    /// <summary>用 index.html 的内容算一个稳定指纹</summary>
+    /// <summary>
+    /// 用全部内嵌 Web 资源的内容算指纹。
+    ///
+    /// 不能只哈希 index.html：新版本常常只改 src/*.js，外壳页面没变，
+    /// 指纹就完全相同 → .ready 命中旧目录 → 用户升级后仍在跑旧代码。
+    /// </summary>
     private static string Hash(Assembly asm)
     {
         using var sha = System.Security.Cryptography.SHA256.Create();
-        using var ms = new MemoryStream();
-        using (var s = asm.GetManifestResourceStream("web.index.html"))
-            if (s != null) s.CopyTo(ms);
 
-        var hash = sha.ComputeHash(ms.ToArray());
-        return Convert.ToHexString(hash).ToLowerInvariant().Substring(0, 12);
+        var names = asm.GetManifestResourceNames()
+            .Where(n => n.StartsWith("web.", StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal);
+
+        foreach (var name in names)
+        {
+            var nameBytes = Encoding.UTF8.GetBytes(name);
+            sha.TransformBlock(nameBytes, 0, nameBytes.Length, null, 0);
+
+            using var s = asm.GetManifestResourceStream(name);
+            if (s == null) continue;
+            var buf = new byte[81920];
+            int n;
+            while ((n = s.Read(buf, 0, buf.Length)) > 0)
+                sha.TransformBlock(buf, 0, n, null, 0);
+        }
+
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        return Convert.ToHexString(sha.Hash!).ToLowerInvariant().Substring(0, 12);
     }
 
     // ============================================================
@@ -384,6 +457,10 @@ public partial class BlockAnim : Window
 
     private static void HandleClient(TcpClient client, string rootFull)
     {
+        var rootPrefix = rootFull.EndsWith(Path.DirectorySeparatorChar)
+            ? rootFull
+            : rootFull + Path.DirectorySeparatorChar;
+
         using (client)
         {
             try
@@ -416,7 +493,10 @@ public partial class BlockAnim : Window
                 try { path = Path.GetFullPath(Path.Combine(rootFull, rel)); }
                 catch { path = rootFull; }
 
-                if (!path.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+                // 必须带结尾分隔符比较，否则根目录的「同前缀兄弟目录」
+                // （web-abc 与 web-abcdef）会被误判为根内路径。
+                if (!path.Equals(rootFull, StringComparison.OrdinalIgnoreCase) &&
+                    !path.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     WriteSimple(stream, 403, "禁止访问");
                     return;
@@ -633,8 +713,22 @@ public partial class BlockAnim : Window
             // 尺寸明显不合理就当没读到（换过显示器/缩放比的情况）
             if (idx == 4 && nums[2] > 400 && nums[3] > 400)
             {
-                Left = nums[0]; Top = nums[1];
-                Width = nums[2]; Height = nums[3];
+                // 记下的位置可能来自已拔掉的显示器。默认
+                // WindowStartupLocation=CenterScreen 只有在不显式设置
+                // Left/Top 时才生效 —— 把窗口恢复到屏幕外，用户会以为
+                // 程序没启动。超出虚拟桌面就丢弃，回到居中。
+                var vLeft = SystemParameters.VirtualScreenLeft;
+                var vTop = SystemParameters.VirtualScreenTop;
+                var vRight = vLeft + SystemParameters.VirtualScreenWidth;
+                var vBottom = vTop + SystemParameters.VirtualScreenHeight;
+                var visible = nums[0] >= vLeft && nums[0] < vRight - 200
+                           && nums[1] >= vTop && nums[1] < vBottom - 200;
+
+                if (visible)
+                {
+                    Left = nums[0]; Top = nums[1];
+                    Width = nums[2]; Height = nums[3];
+                }
             }
         }
         catch { /* 读不到就用默认值 */ }

@@ -24,6 +24,7 @@ const SUITES = [
   { name: '图片缓存', file: 'test-renderer-img.mjs', desc: '加载失败写回缓存 / 失败重试窗口 / 成功后正常绘制' },
   { name: '浏览器端到端', file: 'test-browser.mjs', desc: '真实 Chromium 驱动 UI：渲染/交互/导出/往返', timeout: 240000, needsBrowser: true },
   { name: '画面内容断言', file: 'test-visual.mjs', desc: '用像素验证每个模板真的画出了该画的东西', timeout: 180000, needsBrowser: true },
+  { name: 'GIF 编码器', file: 'test-gif.mjs', desc: 'Chrome 解码器逐像素验证 LZW/调色板/差分/循环扩展', timeout: 180000, needsBrowser: true },
 ];
 
 /* ============================================================

@@ -35,6 +35,12 @@ function lzwEncode(indices, minCodeSize) {
   const bits = [];
   const emit = (code) => {
     for (let i = 0; i < codeSize; i++) bits.push((code >> i) & 1);
+    // 码宽必须在**输出当前码之后**才提升：
+    // 解码器读完这个码才补上对应的字典项，此时它才需要更宽的码。
+    // 原实现把提升放在「添加字典项之后、输出下一个码之前」，
+    // 比解码器早了一整码 —— 一旦字典增长到 512 项，之后所有码
+    // 都按错误码宽解析，画面从该点起整片错色（GIF 偏色的根因）。
+    if (codeSize < 12 && next === (1 << codeSize)) codeSize++;
   };
 
   let dict = new Map();
@@ -56,17 +62,9 @@ function lzwEncode(indices, minCodeSize) {
     if (next < 4096) {
       dict.set(key, next);
       next++;
-      if (next === (1 << codeSize)) {
-        if (codeSize < 12) codeSize++;
-        else {
-          // 字典满：发 clear 并重置
-          emit(clearCode);
-          dict = new Map();
-          codeSize = minCodeSize + 1;
-          next = eoiCode + 1;
-        }
-      }
     } else {
+      // 字典满：发 clear 并重置。clear 用当前码宽（12 位）发出，
+      // 解码器收到后同样把码宽复位。
       emit(clearCode);
       dict = new Map();
       codeSize = minCodeSize + 1;
@@ -170,7 +168,9 @@ function diffFrame(prev, cur, w, h) {
    但输出字节改成边算边写进 Uint8Array，不再用 number[] 累积。
    ============================================================ */
 export function encodeGIF(frames, w, h, opts = {}) {
-  const { loop = 0, dither = true } = opts;
+  // 抖动默认关闭：Bayer 偏移在纯色/渐变上会叠出可见噪点，
+  // 而 GIF 本来就是「轻量分享」通道，默认值应当优先画质干净。
+  const { loop = 0, dither = false } = opts;
   if (!frames || !frames.length) throw new Error('没有可编码的帧');
 
   // 1) 采样所有帧的像素，统计主色
@@ -283,7 +283,7 @@ export function encodeGIF(frames, w, h, opts = {}) {
    @returns {Promise<Blob>}
    ============================================================ */
 export async function encodeGIFFromSource(source, w, h, opts = {}) {
-  const { loop = 0, dither = true, onProgress = null, shouldCancel = null } = opts;
+  const { loop = 0, dither = false, onProgress = null, shouldCancel = null } = opts;
   const total = source.total;
   if (!total) throw new Error('没有可编码的帧');
   const delayFor = source.delayFor || (() => 5);

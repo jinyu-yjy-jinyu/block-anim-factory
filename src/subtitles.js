@@ -204,17 +204,32 @@ function cloneStyle(s) { return Object.assign({}, s); }
    ============================================================ */
 const pad = (n, w = 2) => String(Math.floor(n)).padStart(w, '0');
 
+/* 时间格式化的进位必须发生在「总毫秒/总厘秒」上：
+   原实现先取整秒再单独 Math.round(小数部分)，0.9996 会输出
+   `00:00:00,1000`（毫秒 4 位）或 ASS 的 `.100`（厘秒 3 位）。 */
+function splitTime(t, unitsPerSecond) {
+  const total = Math.max(0, Math.round(t * unitsPerSecond));
+  const whole = Math.floor(total / unitsPerSecond);
+  const frac = total % unitsPerSecond;
+  return {
+    h: Math.floor(whole / 3600),
+    m: Math.floor((whole % 3600) / 60),
+    s: whole % 60,
+    frac,
+  };
+}
+
 function fmtSrtTime(t) {
-  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60), ms = Math.round((t % 1) * 1000);
-  return `${pad(h)}:${pad(m)}:${pad(s)},${String(ms).padStart(3, '0')}`;
+  const { h, m, s, frac } = splitTime(t, 1000);
+  return `${pad(h)}:${pad(m)}:${pad(s)},${pad(frac, 3)}`;
 }
 function fmtVttTime(t) {
-  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60), ms = Math.round((t % 1) * 1000);
-  return `${pad(h)}:${pad(m)}:${pad(s)}.${String(ms).padStart(3, '0')}`;
+  const { h, m, s, frac } = splitTime(t, 1000);
+  return `${pad(h)}:${pad(m)}:${pad(s)}.${pad(frac, 3)}`;
 }
 function fmtAssTime(t) {
-  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60), cs = Math.round((t % 1) * 100);
-  return `${h}:${pad(m)}:${pad(s)}.${pad(cs)}`;
+  const { h, m, s, frac } = splitTime(t, 100);
+  return `${h}:${pad(m)}:${pad(s)}.${pad(frac, 2)}`;
 }
 
 function parseTime(str) {
@@ -414,11 +429,17 @@ export function distributeWords(cue, opts = {}) {
   const dur = cue.duration;
   const lead = opts.lead || 0;
   let acc = 0;
-  const words = tokens.map(t => {
-    const d = (weights[acc] / total) * dur;
-    const w = { word: t, start: cue.start + acc / total * dur, end: cue.start + (acc / total) * dur + d };
-    acc++;
-    return w;
+  // 起点必须用「已消费权重」累计值。原实现用 tokens.map 的下标 acc
+  // 当权重、又拿 acc/total 当时间比例，多词句会互相重叠 / 留缝
+  //（如「你好世界」：第二个词从 0.25 而不是 0.5 开始）。
+  const words = tokens.map((t, idx) => {
+    const startRatio = acc / total;
+    acc += weights[idx];
+    return {
+      word: t,
+      start: cue.start + startRatio * dur,
+      end: cue.start + (acc / total) * dur,
+    };
   });
   void lead;
   return words;

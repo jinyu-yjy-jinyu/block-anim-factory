@@ -68,11 +68,20 @@ jobs:
         working-directory: desktop-electron
         run: npm run dist
 
+      # 只上传最终安装包/压缩包，不要 dist/**。
+      # dist 里还有 win-unpacked/、mac/、linux-unpacked/ 等中间目录，
+      # 以前整目录上传会把 app.asar、几百个 .pak、electron.exe 一起挂到
+      # 发行版上（v0.4.2 的发行版因此多出 100 多个垃圾资产）。
       - name: 上传打包产物
         uses: actions/upload-artifact@v4
         with:
           name: block-anim-factory-electron-${{ matrix.os }}
-          path: desktop-electron/dist/**
+          path: |
+            desktop-electron/dist/*.exe
+            desktop-electron/dist/*.dmg
+            desktop-electron/dist/*.zip
+            desktop-electron/dist/*.AppImage
+            desktop-electron/dist/*.tar.gz
           retention-days: 30
           if-no-files-found: error
 
@@ -90,7 +99,31 @@ jobs:
         working-directory: desktop-electron
         run: echo "TAG=v$(node -p "require('./package.json').version")" >> $GITHUB_ENV
 
+      # ci.yml 的 release job 与本 workflow 同时被 push main 触发，
+      # 但测试+打包需要几分钟。以前这里直接调用 action-gh-release：
+      # 发行版还没建好时它会**新建一个空发行版并打 tag**，
+      # 于是 ci.yml 的 release job 看到 tag 已存在就跳过，发行说明永久丢失。
+      # 这里先等真正的发行版出现，等不到就跳过挂载（不创建）。
+      - name: 等待网页版发行版
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || env.TAG }}"
+          for i in $(seq 1 90); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "exists=true" >> $GITHUB_OUTPUT
+              echo "发行版 $TAG 已就绪"
+              exit 0
+            fi
+            echo "等待发行版 $TAG（$i/90）…"
+            sleep 10
+          done
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "::warning::15 分钟内没有等到发行版 $TAG，跳过挂载（不会创建空发行版）"
+
       - name: 下载所有平台产物
+        if: steps.wait.outputs.exists == 'true'
         uses: actions/download-artifact@v4
         with:
           path: dist
@@ -98,8 +131,14 @@ jobs:
           merge-multiple: true
 
       - name: 挂到已有的发行版
+        if: steps.wait.outputs.exists == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || env.TAG }}
-          files: dist/**/*
+          files: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.tar.gz
           make_latest: false

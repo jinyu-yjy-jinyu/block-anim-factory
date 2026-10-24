@@ -19,7 +19,7 @@
 ; ============================================================
 
 #define AppName "积木动画工厂"
-#define AppVersion "0.4.2"
+#define AppVersion "0.4.3"
 #define AppPublisher "block-anim-factory"
 #define AppURL "https://github.com/jinyu-yjy-jinyu/block-anim-factory"
 #define AppExeName "积木动画工厂.exe"

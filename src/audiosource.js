@@ -110,11 +110,15 @@ export class AudioSource {
       if (tr.muted || !tr.samples.length) continue;
       const a = tr.ensureAnalysis();
       const bands = a.bands;
-      const offset = Math.round((tr.start || 0) * this.fps);
+      // 分析结果固定按 60fps 生成（analyzeTrack 的默认值），
+      // 而这里的输出数组按项目 fps 索引 —— 直接拿 i 取 bands[i]
+      // 在非 60fps 工程里会把时间轴整体压缩/拉伸。
+      const bandFps = bands.fps || 60;
+      const offset = tr.start || 0;
       const gain = tr.gain == null ? 1 : tr.gain;
 
       for (let i = 0; i < total; i++) {
-        const j = i - offset;
+        const j = Math.round((i / this.fps - offset) * bandFps);
         if (j < 0 || j >= bands.amp.length) continue;
         amp[i] = Math.max(amp[i], bands.amp[j] * gain);
         bass[i] = Math.max(bass[i], bands.bass[j] * gain);

@@ -97,16 +97,72 @@ class FrameSource {
 /* ============================================================
    1) WebCodecs 编码（Chrome/Edge，最快）
    ============================================================ */
+
+/* H.264 级别表：[level_idc, MaxFS（宏块数）, MaxMBPS（宏块/秒）]。
+   固定写 3.1 时，1080p（8160 宏块）已经超出该级别上限 ——
+   严格些的解码器会拒绝播放。按分辨率/帧率选最低够用的级别。 */
+const AVC_LEVELS = [
+  [0x1e, 1620, 40500],     // 3.0
+  [0x1f, 3600, 108000],    // 3.1
+  [0x20, 5120, 216000],    // 3.2
+  [0x28, 8192, 245760],    // 4.0
+  [0x29, 8192, 245760],    // 4.1
+  [0x2a, 8704, 522240],    // 4.2
+  [0x32, 22080, 589824],   // 5.0
+  [0x33, 36864, 983040],   // 5.1
+  [0x34, 36864, 2073600],  // 5.2
+  [0x3c, 139264, 4177920], // 6.0
+  [0x3d, 139264, 8355840], // 6.1
+  [0x3e, 139264, 16711680],// 6.2
+];
+function pickAvcLevel(width, height, fps) {
+  const fs = Math.ceil(width / 16) * Math.ceil(height / 16);
+  const mbps = fs * fps;
+  for (const [idc, maxFS, maxMBPS] of AVC_LEVELS) {
+    if (fs <= maxFS && mbps <= maxMBPS) return idc;
+  }
+  return 0x3e;
+}
+
+/* HEVC 级别表：[level_idc, MaxLumaPs, MaxLumaSr] */
+const HEVC_LEVELS = [
+  [93, 921600, 33177600],      // 3.1
+  [120, 2228224, 66846720],    // 4.0
+  [123, 2228224, 133693440],   // 4.1
+  [150, 8912896, 267386880],   // 5.0
+  [153, 8912896, 534773760],   // 5.1
+  [156, 8912896, 1069547520],  // 5.2
+  [180, 35651584, 1069547520], // 6.0
+  [183, 35651584, 2139095040], // 6.1
+  [186, 35651584, 4278190080], // 6.2
+];
+function pickHevcLevel(width, height, fps) {
+  const ps = width * height, sr = ps * fps;
+  for (const [idc, maxPs, maxSr] of HEVC_LEVELS) {
+    if (ps <= maxPs && sr <= maxSr) return idc;
+  }
+  return 186;
+}
+
+/** WebCodecs 的 codec 字符串：High profile + 按尺寸/帧率选级别 */
+export function webCodecsCodecString(kind, width, height, fps) {
+  if (kind === 'h265') return `hev1.1.6.L${pickHevcLevel(width, height, fps)}.B0`;
+  return `avc1.6400${pickAvcLevel(width, height, fps).toString(16).padStart(2, '0')}`;
+}
+
 async function encodeWebCodecs(src, opts = {}) {
   const width = src.w & ~1, height = src.h & ~1;
-  const codec = opts.codec === 'h265' ? 'hev1.1.6.L93.B0' : 'avc1.42001f';
+  const isHevc = opts.codec === 'h265';
+  // High profile + 按尺寸选级别：Baseline 3.1 装不下 1080p
+  const codec = webCodecsCodecString(isHevc ? 'h265' : 'h264', width, height, src.fps);
   const config = {
     codec,
     width, height,
     bitrate: opts.bitrate || 8_000_000,
     framerate: src.fps,
-    // MP4 需要 avcC 描述；浏览器会自动填
+    // MP4 需要 avcC / hvcC 描述；必须要求输出带描述的长度前缀格式
     avc: codec.startsWith('avc') ? { format: 'avc' } : undefined,
+    hevc: codec.startsWith('hev') || codec.startsWith('hvc') ? { format: 'hevc' } : undefined,
     latencyMode: 'quality',
   };
 
@@ -141,8 +197,13 @@ async function encodeWebCodecs(src, opts = {}) {
   const canvas = src.makeCanvas(width, height);
   const timescale = 1_000_000;
   const frameDur = Math.round(timescale / src.fps);
+  const shouldCancel = opts.shouldCancel || (() => false);
 
   for (let i = 0; i < src.total; i++) {
+    if (shouldCancel()) {
+      try { encoder.close(); } catch { /* 已取消，关闭失败无所谓 */ }
+      throw new Error('已取消');
+    }
     src.draw(canvas, i);
     const frame = new VideoFrame(canvas, {
       timestamp: i * frameDur,
@@ -161,6 +222,7 @@ async function encodeWebCodecs(src, opts = {}) {
   await encoder.flush();
   encoder.close();
   if (encodeError) throw encodeError;
+  if (shouldCancel()) throw new Error('已取消');
   if (!chunks.length) throw new Error('编码器没有产出任何数据');
   // 每帧的真实时长：WebCodecs 给的是微秒，转成 media timescale（90000）
   const delta = Math.round(1_000_000 / src.fps);
@@ -232,11 +294,11 @@ class ByteWriter {
   result() { return this.buf.slice(0, this.len); }
 }
 
-/* ---- avcC：把 WebCodecs 的 description 包成 avcC box ---- */
-function writeAvcC(w, desc) {
-  const p = w.beginBox('avcC');
-  // description 本身就是 AVCDecoderConfigurationRecord 的内容，
-  // 前面补 1 字节 configurationVersion 已在 description 里，不重复写。
+/* ---- avcC / hvcC：把 WebCodecs 的 description 包成配置盒 ---- */
+function writeConfigBox(w, type, desc) {
+  const p = w.beginBox(type);
+  // description 本身就是 AVCDecoderConfigurationRecord /
+  // HEVCDecoderConfigurationRecord 的内容，直接写入。
   w.bytes(desc);
   w.endBox(p);
 }
@@ -252,8 +314,15 @@ function pickDescription(chunks) {
   return null;
 }
 
-function muxMP4({ chunks, width, height, fps }) {
+function muxMP4({ chunks, width, height, fps, codec = 'avc1' }) {
   if (!chunks || !chunks.length) throw new Error('没有可封装的编码数据');
+
+  // HEVC 的样本条目和配置盒是 hvc1/hvcC；写成 avc1/avcC 会让
+  // 播放器按 AVC 解析 HEVC 码流，元数据能读、画面解不出来。
+  const isHevc = /^(hev|hvc)/i.test(codec);
+  const sampleEntry = isHevc ? 'hvc1' : 'avc1';
+  const configBox = isHevc ? 'hvcC' : 'avcC';
+  const codecName = isHevc ? 'BlockAnim H.265' : 'BlockAnim H.264';
 
   const MOVIE_TIMESCALE = 1000;
   const MEDIA_TIMESCALE = 90000;      // H.264 惯例，帧时长取整更准
@@ -372,11 +441,11 @@ function muxMP4({ chunks, width, height, fps }) {
     /* ---- stbl：四张表 ---- */
     const stbl = w.beginBox('stbl');
 
-    /* stsd —— 只有 avc1 一条，avcC 必须在这里 */
+    /* stsd —— 一条样本条目，avcC / hvcC 必须在这里 */
     {
       const p = w.beginBox('stsd');
       w.u32(0); w.u32(1);               // version+flags, entry_count = 1
-      const e = w.beginBox('avc1');
+      const e = w.beginBox(sampleEntry);
       w.zeros(6);                       // reserved[6]
       w.u16(1);                         // data_reference_index
       w.u16(0); w.u16(0);               // pre_defined, reserved
@@ -386,12 +455,11 @@ function muxMP4({ chunks, width, height, fps }) {
       w.u32(0);                         // reserved
       w.u16(1);                         // frame_count
       // compressorname：32 字节定长字符串
-      const name = 'BlockAnim H.264';
-      w.u8(name.length);
-      for (let i = 0; i < 31; i++) w.u8(i < name.length ? name.charCodeAt(i) : 0);
+      w.u8(codecName.length);
+      for (let i = 0; i < 31; i++) w.u8(i < codecName.length ? codecName.charCodeAt(i) : 0);
       w.u16(0x0018);                    // depth = 24-bit
       w.i16(-1);                        // pre_defined = -1
-      if (desc) writeAvcC(w, desc);     // ← 关键：没有它播放器解不出画面
+      if (desc) writeConfigBox(w, configBox, desc); // ← 没有它播放器解不出画面
       w.endBox(e);
       w.endBox(p);
     }
@@ -400,7 +468,7 @@ function muxMP4({ chunks, width, height, fps }) {
     {
       const runs = [];
       for (let i = 0; i < chunks.length; i++) {
-        const d = i < chunks[i].delta ? chunks[i].delta : frameDelta;
+        const d = chunks[i].delta || frameDelta;
         if (runs.length && runs[runs.length - 1].delta === d) runs[runs.length - 1].count++;
         else runs.push({ count: 1, delta: d });
       }
@@ -476,7 +544,7 @@ function muxMP4({ chunks, width, height, fps }) {
   ftyp.u32(0x200);          // minor_version
   ftyp.ascii('isom');       // major_brand
   ftyp.ascii('iso2');       // compatible_brands[0]
-  ftyp.ascii('avc1');       // compatible_brands[1]
+  ftyp.ascii(sampleEntry);  // compatible_brands[1]（avc1 或 hvc1）
   ftyp.ascii('mp41');       // compatible_brands[2]
   // 4(长度)+4(ftyp)+4(isom)+4(0x200)+4×4(brands) = 32
 
@@ -504,17 +572,23 @@ function muxMP4({ chunks, width, height, fps }) {
   const verify = verifyMP4(out.result(), {
     expectSamples: chunks.length,
     expectChunkBytes: mdatPayloadSize,
+    sampleEntry,
+    configBox,
   });
 
   return {
     bytes: out.result(),
     verify,
     descFound: !!desc,
+    sampleEntry,
+    configBox,
   };
 }
 
 /** 解析刚生成的 MP4，把四张表的 entry_count 与 mdat 实际字节读回来核对 */
-function verifyMP4(buf, expect) {
+function verifyMP4(buf, expect = {}) {
+  const sampleEntry = expect.sampleEntry || 'avc1';
+  const configBox = expect.configBox || 'avcC';
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const result = { ok: false, tables: {}, mdatBytes: 0, errors: [] };
   let p = 0;
@@ -572,29 +646,36 @@ function verifyMP4(buf, expect) {
                 for (let i = 0; i < sampleCount; i++) sum += dv.getUint32(stsz.body + 12 + i * 4);
                 result.stszTotalBytes = sum;
               }
-              // stsd 里有没有 avcC
+              // stsd 里有没有 avcC / hvcC
               // 两个坑叠在一起：
               //  1) stsd 的 body 起始是 version+flags(4B) + entry_count(4B)，
               //     第一个样本条目从 body+8 才开始。从 body 起读会把
               //     0x01000001 当成 size，直接判定失败。
-              //  2) avc1 的前 78 字节是固定字段而非嵌套 box，
-              //     所以进 avc1 之后不能继续用 findBox，要直接搜 'avcC' 标记。
+              //  2) avc1/hvc1 的前 78 字节是固定字段而非嵌套 box，
+              //     所以进样本条目之后不能继续用 findBox，要直接搜配置盒标记。
               const stsd = findBox(stbl.body, stbl.end, 'stsd');
               if (stsd) {
-                const avc1 = findBox(stsd.body + 8, stsd.end, 'avc1');
-                if (avc1) {
-                  let hasAvcC = false, avcCLength = 0;
-                  for (let i = avc1.body; i + 8 <= avc1.end; i++) {
-                    if (buf[i] === 0x61 && buf[i + 1] === 0x76 && buf[i + 2] === 0x63 && buf[i + 3] === 0x43) {
-                      hasAvcC = true;
-                      avcCLength = dv.getUint32(i - 4) - 8;
+                const entry = findBox(stsd.body + 8, stsd.end, sampleEntry);
+                if (entry) {
+                  let hasConfig = false, configLength = 0;
+                  const c0 = configBox.charCodeAt(0), c1 = configBox.charCodeAt(1);
+                  const c2 = configBox.charCodeAt(2), c3 = configBox.charCodeAt(3);
+                  for (let i = entry.body; i + 8 <= entry.end; i++) {
+                    if (buf[i] === c0 && buf[i + 1] === c1 && buf[i + 2] === c2 && buf[i + 3] === c3) {
+                      hasConfig = true;
+                      configLength = dv.getUint32(i - 4) - 8;
                       break;
                     }
                   }
-                  result.hasAvcC = hasAvcC;
-                  result.avcCLength = avcCLength;
+                  result.sampleEntry = sampleEntry;
+                  result.configBox = configBox;
+                  result.hasConfig = hasConfig;
+                  result.configLength = configLength;
+                  // 兼容旧字段（test-mp4 的日志读的是 hasAvcC / avcCLength）
+                  if (sampleEntry === 'avc1') { result.hasAvcC = hasConfig; result.avcCLength = configLength; }
+                  if (sampleEntry === 'hvc1') { result.hasHvcC = hasConfig; result.hvcCLength = configLength; }
                 } else {
-                  result.errors.push('stsd 里没有 avc1 样本条目');
+                  result.errors.push(`stsd 里没有 ${sampleEntry} 样本条目`);
                 }
               }
             }
@@ -619,7 +700,7 @@ function verifyMP4(buf, expect) {
     ['stco.entry_count > 0', (t.stco?.entryCount ?? 0) > 0],
     ['stsz 字节总和 == mdat 字节数', t.stsz?.sampleCount > 0 && result.stszTotalBytes === result.mdatBytes],
     ['mdat 有真实数据', result.mdatBytes > 0],
-    ['有 avcC', result.hasAvcC === true],
+    [`有 ${configBox}`, result.hasConfig === true],
   ];
   result.checks = checks.map(([name, pass]) => ({ name, pass }));
   result.ok = result.errors.length === 0 && checks.every(c => c[1]);
@@ -638,18 +719,22 @@ async function encodeViaFFmpeg(src, opts = {}) {
     wasmURL: opts.wasmURL || 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm',
   });
   const canvas = src.makeCanvas();
+  const shouldCancel = opts.shouldCancel || (() => false);
   for (let i = 0; i < src.total; i++) {
+    if (shouldCancel()) throw new Error('已取消');
     src.draw(canvas, i);
     const blob = await canvasToBlob(canvas, 'image/png');
     await ffmpeg.writeFile(`f${String(i).padStart(5, '0')}.png`, new Uint8Array(await blob.arrayBuffer()));
     if (opts.onProgress) opts.onProgress((i + 1) / src.total * 0.5, `准备帧 ${i + 1}/${src.total}`);
   }
+  if (shouldCancel()) throw new Error('已取消');
   await ffmpeg.exec([
     '-framerate', String(src.fps), '-i', 'f%05d.png',
     '-c:v', opts.codec === 'h265' ? 'libx265' : 'libx264',
     '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-crf', String(opts.crf || 20),
     '-movflags', '+faststart', 'out.mp4',
   ]);
+  if (shouldCancel()) throw new Error('已取消');
   const data = await ffmpeg.readFile('out.mp4');
   return new Blob([data], { type: 'video/mp4' });
 }
@@ -686,15 +771,22 @@ export async function exportVideo(ir, audio, opts = {}) {
   }
 
   if (caps.webcodecs) {
+    let res = null;
     try {
       onProgress(0.02, '初始化编码器…');
-      const res = await encodeWebCodecs(src, opts);
+      res = await encodeWebCodecs(src, Object.assign({}, opts, { shouldCancel }));
+    } catch (e) {
+      // 取消不是编码失败，不能掉进 ffmpeg 回退里继续跑
+      if (shouldCancel() || (e && e.message === '已取消')) throw new Error('已取消');
+      onProgress(0.02, `WebCodecs 失败（${e && e.message}），回退 ffmpeg…`);
+    }
+    if (res) {
       onProgress(0.95, '封装容器…');
       const muxed = muxMP4(res);
       if (!muxed.descFound) {
-        // 没有 avcC 就是一条裸码流，浏览器自己解得开（VideoFrame 能喂），
+        // 没有 avcC/hvcC 就是一条裸码流，浏览器自己解得开（VideoFrame 能喂），
         // 但任何第三方播放器都解不出画面 —— 必须让调用方知道
-        throw new Error('编码器没有返回 avcC 描述，生成的 MP4 第三方播放器无法解码');
+        throw new Error(`编码器没有返回 ${muxed.configBox} 描述，生成的 MP4 第三方播放器无法解码`);
       }
       if (!muxed.verify.ok) {
         const bad = muxed.verify.checks.filter(c => !c.pass).map(c => c.name);
@@ -702,12 +794,11 @@ export async function exportVideo(ir, audio, opts = {}) {
       }
       onProgress(1, '完成');
       return new Blob([muxed.bytes], { type: 'video/mp4' });
-    } catch (e) {
-      onProgress(0.02, `WebCodecs 失败（${e.message}），回退 ffmpeg…`);
     }
   }
+  if (shouldCancel()) throw new Error('已取消');
   if (caps.ffmpegWasm || globalThis.__ffmpegLoaded) {
-    const blob = await encodeViaFFmpeg(src, opts);
+    const blob = await encodeViaFFmpeg(src, Object.assign({}, opts, { shouldCancel }));
     onProgress(1, '完成');
     return blob;
   }
@@ -738,6 +829,14 @@ export async function exportFrames(src, opts, onProgress, shouldCancel) {
 }
 
 /* ---------- GIF ---------- */
+/** GIF 帧延时（1/100 秒）：按累计时间取整，避免逐帧取整的漂移 */
+export function gifDelayCs(fps, i) {
+  const startCs = Math.round(i * 100 / fps);
+  const endCs = Math.round((i + 1) * 100 / fps);
+  // GIF 的延时字段最小 2cs（50fps）；更高帧率只能被截到 50fps
+  return Math.max(2, endCs - startCs);
+}
+
 export async function exportGif(src, opts, onProgress, shouldCancel) {
   let w = src.w, h = src.h;
   const maxW = opts.gifMaxWidth || 640;
@@ -757,9 +856,13 @@ export async function exportGif(src, opts, onProgress, shouldCancel) {
       src.draw(canvas, i);
     },
     getRGBA: () => ctx.getImageData(0, 0, w, h).data,
-    delayFor: (i) => Math.max(2, Math.round(100 / src.fps)),
+    // GIF 延时单位是 1/100 秒，不能每帧独立取整：30fps 固定 3cs 每秒
+    // 只有 90cs（快 10%），60fps 最小 2cs 又变成 120cs（慢 20%）。
+    // 按累计时间算「这一帧结束时刻 - 上一帧结束时刻」，误差不再累积。
+    delayFor: (i) => gifDelayCs(src.fps, i),
   }, w, h, {
     loop: 0,
+    dither: opts.dither === true,
     onProgress: (p, msg) => onProgress(p, msg),
     shouldCancel,
   });
