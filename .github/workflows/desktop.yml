@@ -234,6 +234,8 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: 确定标签
         run: echo "TAG=v$(node -p "require('./package.json').version")" >> $GITHUB_ENV
 
@@ -264,5 +266,5 @@ jobs:
 
       - name: 说明
         run: |
-          echo "已把桌面版（zip + 安装包）挂到 ${{ inputs.tag }}"
+          echo "已把桌面版（zip + 安装包）挂到 ${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' && inputs.tag || env.TAG }}"
           echo "注意：安装包未做代码签名，首次运行会触发 SmartScreen。"
