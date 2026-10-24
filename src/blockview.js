@@ -58,11 +58,13 @@ export function renderBlocks() {
   ROOT.scrollTop = scrollTop;
 }
 
+const LAYER_HEAD_COLORS = { text: '#9966ff', rect: '#0fbd8c', circle: '#4c97ff', image: '#ff8c1a' };
+
 function layerHeader(layer) {
   const d = document.createElement('div');
   // 注意：不要用 .block 类，否则会被当成可选中的积木
   d.className = 'block-head';
-  d.style.setProperty('--bc', layer.type === 'text' ? '#0f8a72' : '#8a5a00');
+  d.style.setProperty('--bc', LAYER_HEAD_COLORS[layer.type] || '#4c97ff');
   const h = el('div', 'bh');
   h.appendChild(el('span', 'dot'));
   h.appendChild(el('span', 'lbl', `图层逻辑 · ${layer.name}`));
@@ -78,9 +80,11 @@ function layerHeader(layer) {
 export function blockEl(b, listKey, layer, depth = 0) {
   const def = defOf(b.op);
   const node = document.createElement('div');
-  node.className = 'block';
-  if (def) node.style.setProperty('--bc', def.color);
-  else node.style.setProperty('--bc', '#6b7280');
+  node.className = 'block' + (b.k === 'N' ? ' leaf' : ' cblock');
+  if (def) {
+    node.style.setProperty('--bc', def.color);
+    node.dataset.cat = def.cat || '';
+  } else node.style.setProperty('--bc', '#6b7280');
   node.dataset.id = b.id;
   node.dataset.op = b.op;
   node.dataset.list = listKey;
@@ -88,23 +92,12 @@ export function blockEl(b, listKey, layer, depth = 0) {
   if (S.selected === b.id) node.classList.add('selected');
 
   const h = el('div', 'bh');
-  h.appendChild(el('span', 'dot'));
   h.appendChild(el('span', 'lbl', def ? def.label : `未知(${b.op})`));
-  if (def && !def.isLeaf) h.appendChild(el('span', 'badge', 'C'));
-  if (def && def.isLeaf) h.appendChild(el('span', 'badge', 'N'));
-  const more = el('button', 'more', '⋯');
-  more.dataset.act = 'blockMenu';
-  more.dataset.id = b.id;
-  h.appendChild(more);
-  node.appendChild(h);
 
+  const subRows = [];
   if (b.k === 'N') {
-    node.classList.add('leaf');
-    const row = el('div', 'bslot');
-    row.appendChild(leafArgs(b, def));
-    node.appendChild(row);
+    appendLeafArgs(h, b);
   } else if (b.slots) {
-    const slotWrap = el('div', 'bslot');
     b.slots.forEach((s, i) => {
       if (Array.isArray(s.value)) {
         const row = el('div', 'row');
@@ -117,38 +110,44 @@ export function blockEl(b, listKey, layer, depth = 0) {
         for (const cb of s.value) sub.appendChild(blockEl(cb, `${b.id}:${i}`, layer, depth + 1));
         sub.appendChild(dropzone(`${b.id}:${i}`, layer, b));
         row.appendChild(sub);
-        slotWrap.appendChild(row);
+        subRows.push(row);
       } else {
-        const row = el('div', 'row');
-        if (s.label) row.appendChild(el('span', 'k', s.label));
-        // path = 槽位序号（owner 本身已由 data-owner 定位）
-        row.appendChild(pinEl(s, b, String(i)));
-        slotWrap.appendChild(row);
+        // Scratch 风格：普通参数直接嵌在标题行里
+        if (s.label) h.appendChild(el('span', 'k', s.label));
+        h.appendChild(pinEl(s, b, String(i)));
       }
     });
+  }
+
+  const more = el('button', 'more', '⋯');
+  more.dataset.act = 'blockMenu';
+  more.dataset.id = b.id;
+  h.appendChild(more);
+  node.appendChild(h);
+
+  if (subRows.length) {
+    const slotWrap = el('div', 'bslot');
+    for (const row of subRows) slotWrap.appendChild(row);
     node.appendChild(slotWrap);
   }
   return node;
 }
 
-function leafArgs(b, def) {
-  const wrap = el('div', 'row');
+function appendLeafArgs(h, b) {
   const specs = leafSpec(b.op);
   const vals = [b.a, b.b, b.c, b.p, b.p2];
   if (!specs.length) {
-    wrap.appendChild(el('span', 'k', '()'));
-    return wrap;
+    h.appendChild(el('span', 'k', '()'));
+    return;
   }
   specs.forEach((sd, i) => {
     const key = ['a', 'b', 'c', 'p', 'p2'][i];
-    const fake = { id: b.id, op: b.op };
     const s = {
       type: sd[0], label: sd[1], menu: sd[3] || null, placeholder: sd[4] || '',
       value: vals[i] !== undefined && vals[i] !== null ? vals[i] : defaultForType(sd[0]),
     };
-    wrap.appendChild(pinEl(s, b, `${key}`, false));
+    h.appendChild(pinEl(s, b, `${key}`, false));
   });
-  return wrap;
 }
 
 /* 叶子块参数规格（来自 blocks.js LEAF_SLOTS） */
@@ -411,7 +410,7 @@ function onRootMouseDown(e) {
   if (!head) return;
   const node = head.closest('.block');
   if (!node || node.querySelector('.bh') !== head) return;
-  if (e.target.closest('.more')) return;
+  if (e.target.closest('.more, .pin, .exprmini, input, select, button')) return;
   if (e.button !== 0) return;
   e.preventDefault();
   startDrag({ kind: 'move', id: node.dataset.id }, e);
@@ -424,13 +423,12 @@ export function startDragFromPalette(op, e) {
 function startDrag(payload, ev) {
   const ghost = document.createElement('div');
   ghost.className = 'block dragging';
-  const def = payload.kind === 'new' ? defOf(payload.op) : null;
-  ghost.style.setProperty('--bc', def ? def.color : '#4a8cff');
+  const def = payload.kind === 'new' ? defOf(payload.op) : defOf((findBlockDeep(S.ir, payload.id) || {}).op);
   const g = el('div', 'bh');
-  g.appendChild(el('span', 'dot'));
   g.appendChild(el('span', 'lbl', def ? def.label : (findBlockLabel(payload.id) || '积木')));
   ghost.appendChild(g);
-  ghost.style.cssText += ';position:fixed;left:0;top:0;pointer-events:none;z-index:999;opacity:.85';
+  ghost.style.cssText = 'position:fixed;left:0;top:0;pointer-events:none;z-index:999;opacity:.85';
+  ghost.style.setProperty('--bc', def ? def.color : '#4a8cff');
   document.body.appendChild(ghost);
 
   const sx = ev.clientX, sy = ev.clientY;

@@ -109,7 +109,7 @@ await page.locator('#rightTabs .tab[data-tab="blocks"]').click();
 await page.waitForTimeout(200);
 await page.evaluate(() => document.querySelector('[data-act="palette.close"]').click());
 await page.waitForTimeout(100);
-await page.evaluate(() => { document.getElementById('paletteDrawer').classList.remove('hidden'); });
+await page.locator('#catRail .cat-dot').first().click();
 await page.waitForTimeout(400);
 await page.screenshot({ path: join(OUT, '08-积木库.png') });
 

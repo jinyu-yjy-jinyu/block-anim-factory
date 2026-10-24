@@ -10,17 +10,18 @@
    slots 里的 default 用 'C:' 前缀标记子积木列表。
    ============================================================ */
 
+/* 配色沿用 Scratch 3 的分类色板 */
 export const CATS = {
-  time:    { label: '时间轴', color: '#c2377b', desc: '控制什么时候发生、持续多久 —— 程序化时间轴的全部' },
-  text:    { label: '文字',   color: '#0f8a72', desc: '文字引擎：结构拆分、入场动效、文本表达式' },
-  shape:   { label: '图形',   color: '#8a5a00', desc: '图元、路径、参数化图形、重复器' },
-  fx:      { label: '动效',   color: '#b0521a', desc: '入场 / 退场 / 循环 / 弹性预设' },
-  math:    { label: '数学',   color: '#2b62b8', desc: '四则运算、缓动、取模、插值、随机' },
-  color:   { label: '颜色',   color: '#9a2f6b', desc: '混合、插值、调色' },
-  logic:   { label: '逻辑',   color: '#5a5f6e', desc: '比较、条件、开关' },
-  arr:     { label: '数组',   color: '#0d7a8c', desc: '随机取值、重复、索引' },
-  audio:   { label: '音频驱动', color: '#6b3fc4', desc: '把声音变成可编程的数据源（差异化能力）' },
-  marker:  { label: '标记点', color: '#8a6d00', desc: '锚点：把画面绑定到配音与节拍' },
+  time:    { label: '时间轴', color: '#ffab19', desc: '控制什么时候发生、持续多久 —— 程序化时间轴的全部' },
+  text:    { label: '文字',   color: '#9966ff', desc: '文字引擎：结构拆分、入场动效、文本表达式' },
+  shape:   { label: '图形',   color: '#0fbd8c', desc: '图元、路径、参数化图形、重复器' },
+  fx:      { label: '动效',   color: '#4c97ff', desc: '入场 / 退场 / 循环 / 弹性预设' },
+  math:    { label: '数学',   color: '#59c059', desc: '四则运算、缓动、取模、插值、随机' },
+  color:   { label: '颜色',   color: '#ff6680', desc: '混合、插值、调色' },
+  logic:   { label: '逻辑',   color: '#5cb1d6', desc: '比较、条件、开关' },
+  arr:     { label: '数组',   color: '#ff8c1a', desc: '随机取值、重复、索引' },
+  audio:   { label: '音频驱动', color: '#cf63cf', desc: '把声音变成可编程的数据源（差异化能力）' },
+  marker:  { label: '标记点', color: '#ffbf00', desc: '锚点：把画面绑定到配音与节拍' },
 };
 
 /* helper：构造 slot 描述 */
