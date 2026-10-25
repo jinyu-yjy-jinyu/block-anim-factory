@@ -9,7 +9,7 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { captureAll } from './scripts/golden.mjs';
+import { captureAll, captureTemplate } from './scripts/golden.mjs';
 import { TEMPLATES } from './src/templates.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -18,6 +18,21 @@ const ok = (c, m, x = '') => {
   console.log(`  ${c ? 'OK  ' : 'FAIL'} ${m}${x ? '  → ' + x : ''}`);
   if (!c) fail++;
 };
+
+/* 基线只存摘要，跨平台一旦对不上就查不到原因。
+   这里把出问题那一帧的绘制指令原样打出来，本地用
+   `GOLDEN_DUMP=popTitle:29 node test-goldens.mjs` 打同一帧，两边一比就知道差在哪。 */
+function dumpCalls(key, frame) {
+  const tpl = TEMPLATES.find(t => t.key === key);
+  if (!tpl) return;
+  const { callLists } = captureTemplate(tpl, { withCalls: true });
+  const calls = callLists[frame];
+  if (!calls) return;
+  console.log(`  GOLDEN-DUMP ${key} 第 ${frame} 帧 共 ${calls.length} 条`);
+  calls.forEach((c, i) => console.log(`    ${i} ${c.op} ${JSON.stringify(c.args)}`));
+}
+const [dumpKey, dumpFrame] = (process.env.GOLDEN_DUMP || '').split(':');
+if (dumpKey) dumpCalls(dumpKey, Number(dumpFrame) || 0);
 
 console.log('\n=== 旧模板绘制回归 ===');
 const golden = JSON.parse(await readFile(join(root, 'fixtures', 'legacy-golden.json'), 'utf8'));
@@ -29,6 +44,7 @@ ok(Object.keys(golden.templates).sort().join(',') === keys.slice().sort().join('
   `基线 ${Object.keys(golden.templates).join(',')} / 当前 ${keys.join(',')}`);
 
 let compared = 0;
+let dumped = false;
 for (const key of keys) {
   const want = golden.templates[key];
   const got = live.templates[key];
@@ -44,6 +60,7 @@ for (const key of keys) {
   }
   ok(bad.length === 0, `${key} 全部 ${got.digests.length} 帧绘制一致`,
     bad.length ? `${bad.length} 帧不同，首个在第 ${bad[0]} 帧（t=${(bad[0] / got.fps).toFixed(3)}s）` : '');
+  if (bad.length && !dumped) { dumped = true; dumpCalls(key, bad[0]); }
 }
 
 console.log(`\n  共比较 ${compared} 帧绘制指令`);

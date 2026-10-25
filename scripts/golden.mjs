@@ -108,12 +108,13 @@ export function digestCalls(calls) {
   return createHash('sha256').update(JSON.stringify(calls)).digest('hex');
 }
 
-export function captureTemplate(template) {
+export function captureTemplate(template, opts = {}) {
   const ir = template.make();
   const fps = ir.project.fps;
   const total = Math.round(ir.project.duration * fps);
   const audio = defaultAudio(ir);
   const frames = [];
+  const callLists = opts.withCalls ? [] : null;
   for (let f = 0; f <= total; f++) {
     const t = f / fps;
     const { state } = evaluateFrame(ir, t, audio);
@@ -122,8 +123,9 @@ export function captureTemplate(template) {
     const { ctx, calls } = createRecordingContext();
     render(state, ctx, { time: t });
     frames.push(digestCalls(calls));
+    if (callLists) callLists.push(calls);
   }
-  return { fps, frames: total + 1, digests: frames };
+  return { fps, frames: total + 1, digests: frames, callLists };
 }
 
 export function captureAll() {
