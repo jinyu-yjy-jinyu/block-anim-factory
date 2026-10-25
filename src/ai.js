@@ -9,12 +9,11 @@
      5. （补）从曲线反推动效参数
 
    设计取舍要说清楚：
-   本模块是一个**规则驱动的本地 NLU 引擎**，不联网、不调大模型。
+   本模块是**规则驱动的本地 NLU 引擎**，默认不联网、不调大模型。
    原因：把「能离线跑、结果确定、积木一定合法」放在第一位。
-   将来接真 LLM 时，只要把 parse() 换成「让模型输出同样的
-   Action[] 结构」，其余全链路（一键 Remix、真机校验、
-   反向解释）都能原样复用 —— 所以这里刻意把
-   「语言 → Action[]」单独隔离出来。
+   可选的在线模型适配放在 ai-online.js：它只负责把模型输出整理成
+   同样的 Action[]，校验与编译仍走这里的 actionsToBlocks，所以
+   在线失败时可以直接回退本地规则，积木合法性也由同一套规则兜底。
    ============================================================ */
 
 import { uid, clone } from './ir.js';
@@ -949,3 +948,5 @@ function axisName(a) { return { x: '水平', y: '垂直', both: '两轴' }[a] ||
 function shapeName(s) { return { rect: '矩形', circle: '圆形', triangle: '三角形', star: '星形', line: '线条' }[s] || s; }
 
 export { clone };
+/** 供在线模型适配器复用：op → 槽位键顺序（与 actionsToBlocks 同一张表） */
+export { SLOT_ORDER as ACTION_SLOT_ORDER };

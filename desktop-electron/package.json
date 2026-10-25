@@ -1,6 +1,6 @@
 {
   "name": "block-anim-factory-desktop",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "private": true,
   "description": "积木动画工厂 · Electron 桌面壳（Windows / macOS）",
   "author": "block-anim-factory",

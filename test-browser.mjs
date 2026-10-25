@@ -627,6 +627,21 @@ const aiUI = await page.evaluate(async () => {
 ok(aiUI.ops >= 1, `AI 面板渲染 ${aiUI.ops} 个动作标签`);
 ok(aiUI.hasApply, '有「应用到工程」按钮');
 
+// 14.13b AI：点「应用到工程」真的写入当前图层（防按钮事件名回归）
+const aiApplyClick = await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  const layer = A.ir.layers.find(l => l.id === A.selectedLayerId);
+  const before = (layer.blocks || []).length;
+  const btn = document.querySelector('#aiNlResult button');
+  if (!btn) return { before, after: before, clicked: false, name: layer.name };
+  btn.click();
+  await new Promise(r => setTimeout(r, 200));
+  return { before, after: (layer.blocks || []).length, clicked: true, name: layer.name };
+});
+ok(aiApplyClick.clicked, '「应用到工程」按钮存在且可点击');
+ok(aiApplyClick.after > aiApplyClick.before,
+  `点击后积木 ${aiApplyClick.before} → ${aiApplyClick.after}（图层「${aiApplyClick.name}」）`);
+
 // 14.14 AI 分镜子页签
 const aiSbUI = await page.evaluate(async () => {
   document.querySelector('[data-ai="script"]').click();

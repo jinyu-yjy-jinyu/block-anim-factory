@@ -31,6 +31,7 @@ import * as SUB_EXPORTS from './subtitles.js';
 /* ---------- V3/V4：模板市场 / 素材库 / AI 辅助 / 版本协作 ---------- */
 import { Marketplace, AssetLib, synthSfx, ASSET_KINDS } from './marketplace.js';
 import * as AI from './ai.js';
+import * as AIOnline from './ai-online.js';
 import { Repo } from './collab.js';
 import * as IR_MOD from './ir.js';
 // batch.js 只导入一次（原实现 import 了两次，产生 APP_INTERP / APP_BATCH
@@ -81,6 +82,8 @@ const App = {
   market: null,             // Marketplace
   assets: null,             // AssetLib（免版权素材）
   repo: null,               // Repo（版本与分支）
+  aiConfig: null,           // AI 引擎配置（默认本地规则，可选在线模型）
+  aiStoryboardCache: null,  // 在线分镜结果，供「生成分镜工程」复用
   selectedTemplateId: null,
   selectedRevisionId: null,
   gitMergeInfo: null,
@@ -134,6 +137,7 @@ function boot() {
   BV.bindPinEditing($('blockCanvas'));
 
   initNewPanels();
+  initAiEngine();
 
   loadUiPrefs();
   applyTheme(App.ui.theme, { persist: false });
@@ -822,41 +826,186 @@ function gitPatch() {
 
 /* ============================================================
    V3/V4 · AI 辅助
+   ------------------------------------------------------------
+   默认走 ai.js 的本地规则引擎；用户可在面板里切到 Ollama 或
+   自定义 OpenAI 兼容接口。在线失败一律回退本地，保证离线可用。
    ============================================================ */
-function aiParse() {
+const AI_ENGINE_NOTES = {
+  local: '<b>内置规则引擎</b>：不联网、不上传工程，也不需要 Base URL 或 API Key。',
+  ollama: '<b>Ollama 本地模型</b>：免费、不联网。先安装 Ollama 并执行 <code>ollama pull qwen2.5:7b</code>；若连接被 CORS 拦截，用 <code>OLLAMA_ORIGINS=*</code> 启动 Ollama。',
+  custom: '<b>自定义 OpenAI 兼容接口</b>：请求只发往你填写的地址；密钥只存在本机 localStorage，不写入工程。',
+};
+
+function initAiEngine() {
+  App.aiConfig = AIOnline.loadConfig();
+  const provider = $('aiProvider');
+  if (!provider) return;
+  provider.addEventListener('change', () => {
+    App.aiConfig = AIOnline.setProfile(App.aiConfig, provider.value, {});
+    AIOnline.saveConfig(App.aiConfig);
+    refreshAiEngineUI();
+  });
+  for (const id of ['aiBaseUrl', 'aiModel', 'aiApiKey']) {
+    const el = $(id);
+    if (el) el.addEventListener('change', () => saveAiProfileFromForm({ silent: true }));
+  }
+  refreshAiEngineUI();
+}
+
+function formAiProfile() {
+  return {
+    baseUrl: $('aiBaseUrl') ? $('aiBaseUrl').value : '',
+    model: $('aiModel') ? $('aiModel').value : '',
+    apiKey: $('aiApiKey') ? $('aiApiKey').value : '',
+  };
+}
+
+function saveAiProfileFromForm({ silent = false } = {}) {
+  if (!App.aiConfig) App.aiConfig = AIOnline.defaultConfig();
+  const provider = $('aiProvider') ? $('aiProvider').value : 'local';
+  App.aiConfig = provider === 'local'
+    ? AIOnline.setProfile(App.aiConfig, 'local')
+    : AIOnline.setProfile(App.aiConfig, provider, formAiProfile());
+  AIOnline.saveConfig(App.aiConfig);
+  refreshAiEngineUI({ keepValues: true });
+  if (!silent) toast('AI 引擎设置已保存', 'ok', 1600);
+  return App.aiConfig;
+}
+
+function refreshAiEngineUI({ keepValues = false } = {}) {
+  if (!App.aiConfig) App.aiConfig = AIOnline.defaultConfig();
+  const provider = App.aiConfig.provider;
+  const active = AIOnline.activeProfile(App.aiConfig);
+
+  const sel = $('aiProvider');
+  if (sel) sel.value = provider;
+  const fields = $('aiOnlineFields');
+  if (fields) fields.hidden = provider === 'local';
+  const keyRow = $('aiKeyRow');
+  if (keyRow) keyRow.hidden = provider !== 'custom';
+
+  if (!keepValues) {
+    if ($('aiBaseUrl')) $('aiBaseUrl').value = active.baseUrl || '';
+    if ($('aiModel')) $('aiModel').value = active.model || '';
+    if ($('aiApiKey')) $('aiApiKey').value = active.apiKey || '';
+  }
+
+  const note = $('aiEngineNote');
+  if (note) note.innerHTML = AI_ENGINE_NOTES[provider] || AI_ENGINE_NOTES.local;
+
+  const state = $('aiEngineState');
+  if (state) {
+    state.className = 'ai-engine-state';
+    state.title = active.baseUrl || '';
+    state.textContent = provider === 'local'
+      ? '本地规则 · 不联网'
+      : [active.model, active.baseUrl].filter(Boolean).join(' · ') || '未配置';
+  }
+}
+
+async function aiTestConnection() {
+  saveAiProfileFromForm({ silent: true });
+  if (App.aiConfig.provider === 'local') {
+    toast('本地规则引擎无需连接，随时可用', 'ok', 1800);
+    return;
+  }
+
+  const state = $('aiEngineState');
+  const btn = document.querySelector('[data-act="ai.test"]');
+  if (state) { state.textContent = '测试中…'; state.className = 'ai-engine-state'; }
+  if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = '测试中…'; }
+
+  try {
+    const r = await AIOnline.testConnection(App.aiConfig);
+    const msg = r.models.length ? `连接成功 · ${r.models.length} 个模型` : (r.note || '连接成功');
+    if (state) { state.textContent = msg; state.className = 'ai-engine-state ok'; }
+    toast(r.models.length ? `连接成功，可用：${r.models.slice(0, 3).join('、')}` : '接口连接成功', 'ok', 2800);
+  } catch (e) {
+    if (state) { state.textContent = e.message; state.className = 'ai-engine-state err'; state.title = e.message; }
+    toast(`连接失败：${e.message}`, 'err', 4200);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || '测试连接'; }
+  }
+}
+
+function aiContext() {
+  return {
+    layers: App.ir.layers.map(l => l.name),
+    markers: (App.ir.markers || []).map(m => m.label),
+    duration: App.ir.project.duration,
+    fps: App.ir.project.fps,
+  };
+}
+
+function localAiParse(text, ctx) {
+  const p = new AI.NLParser({ layers: ctx.layers, markers: ctx.markers });
+  const r = p.parse(text);
+  return { actions: r.actions, warnings: r.warnings, compiled: AI.actionsToBlocks(r.actions) };
+}
+
+async function aiParse() {
   const inp = $('aiNlInput');
   const out = $('aiNlResult');
   if (!inp || !out) return;
   const text = inp.value.trim();
   if (!text) { toast('先说点什么吧', 'warn'); return; }
 
-  const p = new AI.NLParser({
-    layers: App.ir.layers.map(l => l.name),
-    markers: (App.ir.markers || []).map(m => m.label),
-  });
-  const r = p.parse(text);
+  const ctx = aiContext();
+  const provider = App.aiConfig ? App.aiConfig.provider : 'local';
+  if (provider === 'local') {
+    renderAiParseResult(out, localAiParse(text, ctx), { engine: 'local' });
+    return;
+  }
+  saveAiProfileFromForm({ silent: true });
+
+  const btn = document.querySelector('[data-act="ai.parse"]');
+  const active = AIOnline.activeProfile(App.aiConfig);
+  out.innerHTML = '';
+  out.appendChild(el2('div', { class: 'engine' }, `正在请求 ${active.model || '在线模型'}…`));
+  if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = '生成中…'; }
+
+  try {
+    const r = await AIOnline.parseActions(text, { config: App.aiConfig, ...ctx });
+    renderAiParseResult(out, r, { engine: 'online', model: active.model });
+    toast(`在线模型识别出 ${r.actions.length} 个动作`, 'ok', 1800);
+  } catch (e) {
+    renderAiParseResult(out, localAiParse(text, ctx), {
+      engine: 'local', fallbackReason: e.message,
+    });
+    toast(`在线模型失败：${e.message}（已回退本地规则）`, 'warn', 3800);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || '转成积木'; }
+  }
+}
+
+function renderAiParseResult(out, r, meta = {}) {
+  const compiled = r.compiled || AI.actionsToBlocks(r.actions);
+  out.innerHTML = '';
+
   if (!r.actions.length) {
-    out.innerHTML = '';
+    if (meta.fallbackReason) {
+      out.appendChild(el2('div', { class: 'warn' }, `在线模型不可用：${meta.fallbackReason}，已回退本地规则。`));
+    }
     out.appendChild(el2('div', { class: 'err' }, '没解析出任何动作。试试更具体的说法，例如「让标题逐字弹入，延迟 0.05 秒」。'));
     return;
   }
 
-  out.innerHTML = '';
-  out.appendChild(el2('h6', {}, `识别出 ${r.actions.length} 个动作：`));
+  const engine = meta.engine === 'online' ? `在线模型 ${meta.model || ''}` : '本地规则引擎';
+  out.appendChild(el2('div', { class: 'engine' }, `${engine} · 识别出 ${r.actions.length} 个动作`));
+  if (meta.fallbackReason) {
+    out.appendChild(el2('div', { class: 'warn' }, `在线模型不可用：${meta.fallbackReason}，已回退本地规则。`));
+  }
   for (const a of r.actions) {
-    const def = a.op;
     out.appendChild(el2('div', { class: 'line' }, [
-      el2('span', { class: 'op' }, def),
+      el2('span', { class: 'op' }, a.op),
       el2('span', {}, a.why),
     ]));
   }
-  if (r.warnings.length) {
-    out.appendChild(el2('h6', {}, '没听懂的片段：'));
+  if (r.warnings && r.warnings.length) {
+    out.appendChild(el2('h6', {}, meta.engine === 'online' ? '模型输出的告警：' : '没听懂的片段：'));
     for (const w of r.warnings) out.appendChild(el2('div', { class: 'warn' }, '· ' + w));
   }
 
-  // 预览编译结果
-  const compiled = AI.actionsToBlocks(r.actions);
   if (compiled.skipped.length) {
     out.appendChild(el2('h6', {}, '无法转换的部分：'));
     for (const s of compiled.skipped) {
@@ -880,16 +1029,13 @@ function aiParse() {
   out.appendChild(apply);
 }
 
-function aiStoryboard() {
-  const inp = $('aiScriptInput');
-  const out = $('aiScriptResult');
-  if (!inp || !out) return;
-  const text = inp.value.trim();
-  if (!text) { toast('先粘贴一段文案', 'warn'); return; }
-
-  const sb = AI.scriptToStoryboard(text);
+function renderAiStoryboardResult(out, sb, meta = {}) {
   out.innerHTML = '';
-  out.appendChild(el2('h6', {}, `拆成 ${sb.scenes.length} 个场景，共 ${sb.totalDuration}s / ${sb.wordCount} 字`));
+  const engine = meta.engine === 'online' ? `在线模型 ${meta.model || ''}` : '本地规则引擎';
+  out.appendChild(el2('div', { class: 'engine' }, `${engine} · 拆成 ${sb.scenes.length} 个场景，共 ${sb.totalDuration}s / ${sb.wordCount} 字`));
+  if (meta.fallbackReason) {
+    out.appendChild(el2('div', { class: 'warn' }, `在线模型不可用：${meta.fallbackReason}，已回退本地规则。`));
+  }
   for (const s of sb.scenes) {
     out.appendChild(el2('div', { class: 'scene' }, [
       el2('div', { class: 't' }, `SC${s.index + 1}　${s.text}`),
@@ -899,10 +1045,55 @@ function aiStoryboard() {
   }
 }
 
+async function aiStoryboard() {
+  const inp = $('aiScriptInput');
+  const out = $('aiScriptResult');
+  if (!inp || !out) return;
+  const text = inp.value.trim();
+  if (!text) { toast('先粘贴一段文案', 'warn'); return; }
+
+  const provider = App.aiConfig ? App.aiConfig.provider : 'local';
+  if (provider === 'local') {
+    const sb = AI.scriptToStoryboard(text);
+    App.aiStoryboardCache = { text, sb, engine: 'local' };
+    renderAiStoryboardResult(out, sb, { engine: 'local' });
+    return;
+  }
+  saveAiProfileFromForm({ silent: true });
+
+  const btn = document.querySelector('[data-act="ai.storyboard"]');
+  const active = AIOnline.activeProfile(App.aiConfig);
+  out.innerHTML = '';
+  out.appendChild(el2('div', { class: 'engine' }, `正在请求 ${active.model || '在线模型'}…`));
+  if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = '生成中…'; }
+
+  try {
+    const sb = await AIOnline.generateStoryboard(text, {
+      config: App.aiConfig,
+      duration: App.ir.project.duration,
+      fps: App.ir.project.fps,
+    });
+    App.aiStoryboardCache = { text, sb, engine: 'online', model: active.model };
+    renderAiStoryboardResult(out, sb, { engine: 'online', model: active.model });
+    toast(`在线模型拆出 ${sb.scenes.length} 个场景`, 'ok', 1800);
+  } catch (e) {
+    const sb = AI.scriptToStoryboard(text);
+    App.aiStoryboardCache = { text, sb, engine: 'local' };
+    renderAiStoryboardResult(out, sb, { engine: 'local', fallbackReason: e.message });
+    toast(`在线模型失败：${e.message}（已回退本地规则）`, 'warn', 3800);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || '拆成分镜'; }
+  }
+}
+
 function aiStoryboardApply() {
   const inp = $('aiScriptInput');
   if (!inp || !inp.value.trim()) { toast('先粘贴一段文案', 'warn'); return; }
-  const sb = AI.scriptToStoryboard(inp.value.trim());
+  const text = inp.value.trim();
+  // 如果刚用在线模型拆过分镜，直接复用它的结果；否则回退本地规则
+  const cached = App.aiStoryboardCache && App.aiStoryboardCache.text === text
+    ? App.aiStoryboardCache.sb : null;
+  const sb = cached || AI.scriptToStoryboard(text);
 
   // 用分镜生成一个真实工程：每个场景一个文字图层，按建议的动效入场
   pushUndo();
@@ -3343,7 +3534,7 @@ function el2(tag, attrs = {}, children = []) {
   for (const [k, v] of Object.entries(attrs || {})) {
     if (k === 'class') e.className = v;
     else if (k === 'style') e.style.cssText = v;
-    else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+    else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2).toLowerCase(), v);
     else if (v !== null && v !== undefined) e.setAttribute(k, v);
   }
   for (const c of [].concat(children)) {
@@ -3869,6 +4060,8 @@ function doAction(act) {
     case 'ai.parse': aiParse(); break;
     case 'ai.storyboard': aiStoryboard(); break;
     case 'ai.storyboardApply': aiStoryboardApply(); break;
+    case 'ai.test': aiTestConnection(); break;
+    case 'ai.saveConfig': saveAiProfileFromForm(); break;
     case 'ai.fromSubs': aiFromSubs(); break;
     case 'ai.explainLayer': aiExplainLayer(); break;
     case 'ai.explainAll': aiExplainAll(); break;
@@ -4088,9 +4281,17 @@ window.BlockAnim = {
   get time() { return App.time; },
   get selectedLayerId() { return App.layerId; },
   get ui() { return { ...App.ui }; },
+  get aiConfig() { return AIOnline.activeProfile(App.aiConfig || AIOnline.defaultConfig()); },
 
   setTheme(theme) { applyTheme(theme); return App.ui.theme; },
   setTimelineMode(mode) { applyTimelineMode(mode); return App.ui.tlMode; },
+  setAiConfig(cfg = {}) {
+    const provider = cfg.provider || (App.aiConfig ? App.aiConfig.provider : 'custom');
+    App.aiConfig = AIOnline.setProfile(App.aiConfig || AIOnline.defaultConfig(), provider, cfg);
+    AIOnline.saveConfig(App.aiConfig);
+    refreshAiEngineUI();
+    return AIOnline.activeProfile(App.aiConfig);
+  },
 
   setTime(t) {
     setPlaying(false);

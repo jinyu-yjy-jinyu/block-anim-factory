@@ -6,6 +6,7 @@ const U = (p) => pathToFileURL(resolve(dirname(fileURLToPath(import.meta.url)), 
 
 const MK = await import(U('src/marketplace.js'));
 const AI = await import(U('src/ai.js'));
+const AIO = await import(U('src/ai-online.js'));
 const CO = await import(U('src/collab.js'));
 const IR = await import(U('src/ir.js'));
 const TP = await import(U('src/templates.js'));
@@ -426,6 +427,187 @@ t('AI:表达式积木不进顶层', () => {
   const c = AI.actionsToBlocks([{ op: 'amp', slots: {} }]);
   eq(c.blocks.length, 0);
   ok(c.skipped[0].reason.includes('表达式'));
+});
+
+/* ============================================================
+   AI：可选在线模型（OpenAI 兼容协议）
+   ============================================================ */
+t('在线AI:默认本地、配置可持久化', () => {
+  const mem = new Map();
+  const storage = {
+    getItem: k => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, v),
+  };
+  eq(AIO.defaultConfig().provider, 'local');
+  AIO.saveConfig(AIO.setProfile(AIO.defaultConfig(), 'custom', {
+    baseUrl: ' https://api.example.com/v1/ ', model: ' m1 ', apiKey: ' sk-x ',
+  }), storage);
+  const loaded = AIO.loadConfig(storage);
+  eq(loaded.provider, 'custom');
+  eq(loaded.custom.baseUrl, 'https://api.example.com/v1');
+  eq(loaded.custom.model, 'm1');
+  eq(AIO.activeProfile(loaded).apiKey, 'sk-x');
+  eq(AIO.loadConfig({ getItem: () => '{bad json' }).provider, 'local');
+});
+
+t('在线AI:Base URL 归一化与动作白名单', () => {
+  eq(AIO.normalizeBaseUrl('http://127.0.0.1:11434/v1/chat/completions/'), 'http://127.0.0.1:11434/v1');
+  eq(AIO.normalizeBaseUrl('https://x.test/v1///'), 'https://x.test/v1');
+  const ops = AIO.actionCatalog().map(a => a.op);
+  ok(ops.includes('fadeIn'));
+  ok(!ops.includes('notReal'));
+  ok(!ops.includes('particles'), '已知有问题的粒子积木不对在线模型开放');
+});
+
+t('在线AI:模型动作被强类型校验后编译', () => {
+  const { actions, warnings } = AIO.coerceActions([
+    { op: 'fadeIn', slots: { layer: '标题文字', dur: '1.5', start: '0.2', extra: 1 }, why: '标题淡入' },
+    { op: 'notReal', slots: {} },
+  ], { layers: ['标题文字'] });
+  eq(actions.length, 1);
+  eq(warnings.length, 1);
+  eq(actions[0].slots.dur.t, 'time');
+  eq(actions[0].slots.dur.v, 1.5);
+  eq(actions[0].slots.start.v, 0.2);
+  ok(!('extra' in actions[0].slots), '多余参数应被丢弃');
+  const c = AI.actionsToBlocks(actions);
+  eq(c.blocks.length, 1);
+  eq(c.skipped.length, 0);
+  eq(c.blocks[0].slots[1].value.v, 1.5);
+});
+
+t('在线AI:不存在的图层被丢弃并告警', () => {
+  const { actions, warnings } = AIO.coerceActions(
+    [{ op: 'fadeIn', slots: { layer: '不存在', dur: 1 } }],
+    { layers: ['标题文字'] },
+  );
+  ok(!('layer' in actions[0].slots));
+  ok(warnings.some(w => w.includes('不存在')));
+});
+
+t('在线AI:兼容代码块包裹的 JSON', () => {
+  const r = AIO.parseActionsFromContent(
+    '好的：\n```json\n{"actions":[{"op":"fadeIn","slots":{"layer":"标题文字","dur":1}}]}\n```',
+    { layers: ['标题文字'] },
+  );
+  eq(r.actions.length, 1);
+  eq(AIO.extractJSON('prefix [1,2] suffix').length, 2);
+});
+
+t('在线AI:请求路径/鉴权/模型并编译积木', async () => {
+  let seen = null;
+  const fakeFetch = async (url, init) => {
+    seen = { url, init };
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: '{"actions":[{"op":"fadeIn","slots":{"layer":"标题文字","dur":1.2},"why":"淡入"}]}' } }],
+      }),
+    };
+  };
+  const r = await AIO.parseActions('标题淡入', {
+    config: {
+      provider: 'custom',
+      custom: { baseUrl: 'https://api.example.com/v1/', model: 'm1', apiKey: 'sk-test' },
+    },
+    layers: ['标题文字'], markers: ['M1'], fetchImpl: fakeFetch,
+  });
+  eq(seen.url, 'https://api.example.com/v1/chat/completions');
+  eq(seen.init.method, 'POST');
+  eq(seen.init.headers.Authorization, 'Bearer sk-test');
+  const body = JSON.parse(seen.init.body);
+  eq(body.model, 'm1');
+  eq(body.messages.length, 2);
+  ok(body.messages[0].content.includes('fadeIn'), '系统提示词应包含积木白名单');
+  eq(r.actions.length, 1);
+  eq(AI.actionsToBlocks(r.actions).blocks.length, 1);
+});
+
+t('在线AI:Ollama 无密钥时不发 Authorization', async () => {
+  let seen = null;
+  const fakeFetch = async (url, init) => {
+    seen = { url, init };
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        choices: [{ message: { content: '{"actions":[{"op":"fadeIn","slots":{"layer":"标题文字"}}]}' } }],
+      }),
+    };
+  };
+  await AIO.parseActions('标题淡入', {
+    config: { provider: 'ollama' }, layers: ['标题文字'], fetchImpl: fakeFetch,
+  });
+  eq(seen.url, 'http://127.0.0.1:11434/v1/chat/completions');
+  ok(!('Authorization' in seen.init.headers));
+});
+
+t('在线AI:接口错误带状态码且不崩', async () => {
+  let err = null;
+  try {
+    await AIO.parseActions('标题淡入', {
+      config: {
+        provider: 'custom',
+        custom: { baseUrl: 'https://api.example.com/v1', model: 'm', apiKey: 'bad' },
+      },
+      layers: [],
+      fetchImpl: async () => ({
+        ok: false, status: 401,
+        text: async () => JSON.stringify({ error: { message: 'invalid key' } }),
+      }),
+    });
+  } catch (e) { err = e; }
+  ok(err && err.message.includes('401') && err.message.includes('invalid key'));
+});
+
+t('在线AI:连接测试解析模型列表', async () => {
+  let seen = null;
+  const r = await AIO.testConnection({ provider: 'ollama' }, {
+    fetchImpl: async (url, init) => {
+      seen = { url, init };
+      return {
+        ok: true, status: 200,
+        text: async () => JSON.stringify({ object: 'list', data: [{ id: 'qwen2.5:7b' }, { id: 'llama3.1' }] }),
+      };
+    },
+  });
+  eq(seen.url, 'http://127.0.0.1:11434/v1/models');
+  eq(r.models.length, 2);
+  ok(r.models.includes('qwen2.5:7b'));
+});
+
+t('在线AI:拒绝非 http(s) 的 Base URL', () => {
+  let err = null;
+  try {
+    AIO.validateConfig({ provider: 'custom', custom: { baseUrl: 'file:///etc/passwd', model: 'x' } });
+  } catch (e) { err = e; }
+  ok(err && err.message.includes('http'), '应拒绝 file:// 协议');
+});
+
+t('在线AI:分镜按累计时间排列并回退非法动效', async () => {
+  const fakeFetch = async () => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify({
+      choices: [{
+        message: {
+          content: '{"scenes":[{"text":"第一句。","duration":2,"op":"fadeIn","reason":"开场"},{"text":"第二句","duration":3,"op":"notReal","reason":"x"}]}',
+        },
+      }],
+    }),
+  });
+  const sb = await AIO.generateStoryboard('第一句。第二句', {
+    config: { provider: 'ollama' }, fetchImpl: fakeFetch,
+  });
+  eq(sb.scenes.length, 2);
+  eq(sb.scenes[0].start, 0);
+  eq(sb.scenes[0].end, 2);
+  eq(sb.scenes[1].start, 2.35);
+  eq(sb.scenes[1].suggested.op, AI.suggestEffect('第二句').op, '非法动效应回退到本地建议');
+  ok(sb.totalDuration > 0);
+  eq(sb.scenes[0].subtitleText.length, 1);
+  const c = AI.actionsToBlocks(sb.scenes.map(s => ({
+    op: s.suggested.op, slots: { layer: IR.SEL(s.text) },
+  })));
+  eq(c.blocks.length, 2);
 });
 
 /* ============================================================

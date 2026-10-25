@@ -432,15 +432,41 @@
               <input type="file" id="mktFile" accept=".json" hidden>
             </div>
 
-            <!-- AI 辅助（本地规则引擎，不联网） -->
+            <!-- AI 辅助（默认本地规则，可选在线模型） -->
             <div class="tab-page" id="tab-ai">
               <div class="panel-head"><span class="ph-title">AI 辅助</span>
                 <div class="panel-actions">
                   <button data-act="ai.explainAll" title="把整个工程说成人话">解释工程</button>
                 </div>
               </div>
-              <div class="ai-local-note">
-                <b>本地规则引擎</b>：不联网、不上传工程，也不需要 Base URL 或 API Key。
+              <div class="ai-local-note" id="aiEngineNote">
+                <b>内置规则引擎</b>：不联网、不上传工程，也不需要 Base URL 或 API Key。
+              </div>
+              <div class="ai-engine">
+                <label class="ai-engine-row">
+                  <span>AI 引擎</span>
+                  <select id="aiProvider">
+                    <option value="local">内置规则引擎 · 免费离线</option>
+                    <option value="ollama">Ollama 本地模型 · 免费</option>
+                    <option value="custom">自定义 OpenAI 兼容接口</option>
+                  </select>
+                </label>
+                <div id="aiOnlineFields" class="ai-online-fields" hidden>
+                  <label class="ai-field"><span>Base URL</span>
+                    <input id="aiBaseUrl" type="text" spellcheck="false" placeholder="http://127.0.0.1:11434/v1">
+                  </label>
+                  <label class="ai-field"><span>模型</span>
+                    <input id="aiModel" type="text" spellcheck="false" placeholder="qwen2.5:7b">
+                  </label>
+                  <label class="ai-field" id="aiKeyRow"><span>API Key</span>
+                    <input id="aiApiKey" type="password" autocomplete="off" placeholder="sk-…（只存本机）">
+                  </label>
+                  <div class="ai-engine-actions">
+                    <button data-act="ai.test" type="button">测试连接</button>
+                    <button data-act="ai.saveConfig" type="button">保存</button>
+                    <span id="aiEngineState" class="ai-engine-state"></span>
+                  </div>
+                </div>
               </div>
               <div class="ai-tabs">
                 <button class="ai-tab active" data-ai="nl">说句话</button>
