@@ -19,6 +19,13 @@ const STYLE_KEYS = [
 ];
 
 const round = (v) => (typeof v === 'number' && isFinite(v) ? Math.round(v * 1e6) / 1e6 : v);
+/* 样式值在 set 时被 String() 过，光靠 round() 量不到：
+   globalAlpha 差 2 ULP（…74066 vs …74048）就会改掉整帧摘要，
+   于是 Windows/Node24 录的基线在 Linux/Node20 上必然对不上。
+   这里把数字和字符串里嵌的数字一起量化到 1e-6。 */
+const quantize = (v) => (typeof v === 'number'
+  ? round(v)
+  : String(v).replace(/\d+\.\d+/g, m => String(round(Number(m)))));
 const DEFAULT_STYLE = {
   fillStyle: '#000000', strokeStyle: '#000000', globalAlpha: 1, lineWidth: 1,
   font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic',
@@ -34,7 +41,7 @@ export function createRecordingContext() {
 
   const currentStyle = () => {
     const out = {};
-    for (const k of STYLE_KEYS) out[k] = round(style[k]);
+    for (const k of STYLE_KEYS) out[k] = quantize(style[k]);
     return out;
   };
   const rec = (name, args = [], withStyle = false) => {
