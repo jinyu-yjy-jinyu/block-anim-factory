@@ -9,7 +9,7 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { captureAll, captureTemplate } from './scripts/golden.mjs';
+import { captureAll, captureTemplate, callSignatures } from './scripts/golden.mjs';
 import { TEMPLATES } from './src/templates.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -28,8 +28,8 @@ function dumpCalls(key, frame) {
   const { callLists } = captureTemplate(tpl, { withCalls: true });
   const calls = callLists[frame];
   if (!calls) return;
-  console.log(`  GOLDEN-DUMP ${key} 第 ${frame} 帧 共 ${calls.length} 条`);
-  calls.forEach((c, i) => console.log(`    ${i} ${c.op} ${JSON.stringify(c.args)}`));
+  console.log(`  GOLDEN-SIG ${key}#${frame} ${callSignatures(calls)}`);
+  calls.forEach((c, i) => console.log(`    ${i} ${c.op} ${JSON.stringify(c.args)} ${c.style ? JSON.stringify(c.style) : ''}`));
 }
 const [dumpKey, dumpFrame] = (process.env.GOLDEN_DUMP || '').split(':');
 if (dumpKey) dumpCalls(dumpKey, Number(dumpFrame) || 0);

@@ -161,11 +161,13 @@ for (const s of SUITES) {
   // 过滤不能只认 FAIL/✗/失败/Error 这类关键词：各套件自己打印失败明细的
   // 前缀并不统一（例如 test-markdirty / test-renderer-img 用「  · 」开头），
   // 按关键词过滤会让「套件失败但一条明细都不显示」，比不显示更糟。
-  // 现在只在失败时才回显，且保留所有非空行（仍限 12 行）。
+  // 现在只在失败时才回显，且保留所有非空行。
+  // 上限给到 60：以前限 12 行，正好把套件自己打印的诊断（例如绘制基线
+  // 逐条指令摘要）截掉，CI 上看不到失败原因，只能再推一次加打印。
   if (!passed) {
     const lines = r.out.split('\n')
       .filter(l => l.trim().length > 0)
-      .slice(0, 12);
+      .slice(0, 60);
     if (lines.length) console.log(lines.map(l => '   ' + l).join('\n'));
   }
   console.log(`   ${passed ? '✓ 通过' : '✗ 失败'}  (${(ms / 1000).toFixed(1)}s)\n`);

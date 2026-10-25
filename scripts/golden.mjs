@@ -108,6 +108,13 @@ export function digestCalls(calls) {
   return createHash('sha256').update(JSON.stringify(calls)).digest('hex');
 }
 
+/* 逐条调用的短摘要：跨平台对不上时，用它一眼定位到第几条指令。
+   必须带上 style——只比 op+args 会漏掉颜色/透明度/字体这类差异。 */
+export function callSignatures(calls) {
+  return calls.map((c, i) =>
+    `${i}:${createHash('sha1').update(JSON.stringify(c)).digest('hex').slice(0, 6)}`).join(' ');
+}
+
 export function captureTemplate(template, opts = {}) {
   const ir = template.make();
   const fps = ir.project.fps;
