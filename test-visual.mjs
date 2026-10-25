@@ -83,6 +83,9 @@ async function waitForRepaint(page, prevSig) {
 
 async function load(key, time) {
   await page.evaluate((k) => window.BlockAnim.loadTemplate(k), key);
+  // 字体在不同系统上回退到不同字族，字形抗锯齿会让「纯白像素」数量波动；
+  // 等字体真正就绪再采样，避免把字体加载竞态当成画面缺失。
+  await page.evaluate(() => document.fonts && document.fonts.ready);
   await waitForRepaint(page);
   await page.evaluate((t) => window.BlockAnim.setTime(t), time);
   await waitForRepaint(page);
@@ -172,9 +175,9 @@ ok(ringCols >= 6, `频谱条 ${ringCols} 根可见`);
 /* 5. 逐词高亮 @3s：底部文字 + 高亮色 */
 await load('karaoke', 3);
 p = await probe();
-ok(p.bright > 400, `底部字幕有 ${p.bright} 个亮像素`);
+const textPx = p.bright + p.highlight;
+ok(textPx > 800, `底部字幕有 ${p.bright} 个亮像素 + ${p.highlight} 个高亮像素`);
 ok(p.highlight > 60, `有 ${p.highlight} 个高亮色像素（逐词高亮生效）`);
-
 /* 6. 字幕面板：列表与校验结果都渲染出来 */
 await page.evaluate(async () => {
   const A = window.BlockAnim;
