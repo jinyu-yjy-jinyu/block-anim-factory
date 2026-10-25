@@ -12,10 +12,12 @@
      （origin 是 null，只允许 chrome/http/data 等 scheme）。
      实测 file:// 是安全上下文、WebCodecs 可用，但模块一个都加载不了。
 
-   为什么端口必须是 0：
-     用户可能同时开两个实例。硬编码端口第二个就撞了。
+   为什么优先固定端口：
+     localStorage 按 origin 隔离，端口随机等于每次启动都换一个存储空间，
+     AI 密钥、主题和布局偏好会全部丢失。固定端口被占用时再退回 0，
+     两个实例或端口冲突都不会导致应用打不开。
      scripts/serve.mjs 里 PORT=0 的 bug 已修（commit 636ae31），
-     server.js 的 startServer 直接透传 0 给 listen()。
+     server.js 的 startServer 直接透传端口给 listen()。
    ============================================================ */
 
 const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
@@ -187,9 +189,16 @@ if (!gotLock) {
     }
 
     try {
-      // port: 0 → 让系统分配空闲端口，两个实例也不会撞
+      // 优先用固定回环端口：localStorage 按 origin 隔离，端口每次随机
+      // 会让 AI 密钥、主题、时间线布局等偏好在重启后全部丢失。
+      // 端口被别的程序占用时退回 0，绝不因为端口冲突打不开应用。
       const start = await loadServer();
-      server = await start({ root: webRoot, port: 0 });
+      try {
+        server = await start({ root: webRoot, port: 41731 });
+      } catch (e) {
+        if (!e || e.code !== 'EADDRINUSE') throw e;
+        server = await start({ root: webRoot, port: 0 });
+      }
     } catch (e) {
       showErrorPage(mainWindow,
         '本地服务启动失败',

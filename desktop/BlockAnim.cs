@@ -402,9 +402,19 @@ public partial class BlockAnim : Window
 
     private int StartServer(string root)
     {
-        // 端口 0：让系统分配空闲端口，避免和别的程序撞
-        var tcp = new TcpListener(IPAddress.Loopback, 0);
-        tcp.Start();
+        // 优先固定回环端口：localStorage 按 origin 隔离，端口随机会让
+        // AI 密钥、主题、布局偏好在每次启动后丢失。被占用时退回 0。
+        TcpListener tcp;
+        try
+        {
+            tcp = new TcpListener(IPAddress.Loopback, 41732);
+            tcp.Start();
+        }
+        catch (SocketException)
+        {
+            tcp = new TcpListener(IPAddress.Loopback, 0);
+            tcp.Start();
+        }
         var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
         _tcp = tcp;
 
