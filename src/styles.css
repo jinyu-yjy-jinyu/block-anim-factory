@@ -488,6 +488,8 @@ button:disabled{opacity:.35;cursor:default}
 .tl-duration{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--fg3)}
 .tl-duration input{width:62px;padding:3px 6px;font-size:11.5px;font-family:var(--mono);background:#12161d;border-color:#232a35;text-align:right}
 .tl-duration em{font-style:normal;color:var(--fg3)}
+.tl-speed{display:flex;align-items:center;gap:5px;font-size:10.5px;color:var(--fg3)}
+.tl-speed select{width:66px;padding:3px 5px;font-size:11.5px;font-family:var(--mono);background:#12161d;border-color:#232a35}
 
 #tlBody{flex:1;display:flex;min-height:0}
 #tlHeaders{
@@ -669,14 +671,14 @@ button:disabled{opacity:.35;cursor:default}
 }
 .cat-dot{
   width:31px;height:31px;flex:none;border-radius:50%;display:grid;place-items:center;
-  font-size:12px;font-weight:800;color:var(--c,#fff);
+  font-size:12px;font-weight:800;color:var(--c-ink-dark,var(--c,#fff));
   background:color-mix(in srgb,var(--c,#4a8cff) 16%,#0c0f14);
   border:1px solid color-mix(in srgb,var(--c,#4a8cff) 45%,transparent);
   transition:transform .12s,background .12s,box-shadow .12s;
 }
 .cat-dot:hover{transform:scale(1.08);background:color-mix(in srgb,var(--c,#4a8cff) 26%,#0c0f14)}
 .cat-dot.on{
-  background:var(--c,#4a8cff);color:#081017;border-color:transparent;
+  background:var(--c,#4a8cff);color:var(--c-on,#081017);border-color:transparent;
   box-shadow:0 0 0 3px rgba(255,255,255,.12),0 3px 12px rgba(0,0,0,.45);
 }
 .blocks-canvas{
@@ -713,13 +715,13 @@ button:disabled{opacity:.35;cursor:default}
 .pl-item{
   position:relative;display:flex;align-items:center;gap:7px;
   min-height:29px;padding:6px 26px 6px 11px;border-radius:8px;
-  background:var(--bc,#3b4252);color:#fff;font-size:11px;font-weight:700;
+  background:var(--bc-face,var(--bc,#3b4252));color:var(--bc-fg,#fff);font-size:11px;font-weight:700;
   border:none;box-shadow:0 2px 0 rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.16);
   cursor:grab;transition:transform .1s,filter .1s;
 }
 .pl-item::before{
   content:"";width:5px;height:5px;border-radius:50%;flex:none;
-  background:rgba(0,0,0,.32);box-shadow:0 0 0 2px rgba(255,255,255,.12);
+  background:var(--bc-dot,rgba(0,0,0,.32));box-shadow:0 0 0 2px rgba(255,255,255,.12);
 }
 .pl-item::after{
   content:"＋";position:absolute;right:9px;top:50%;transform:translateY(-50%);
@@ -727,7 +729,7 @@ button:disabled{opacity:.35;cursor:default}
 }
 .pl-item:hover{transform:translateX(2px);filter:brightness(1.08)}
 .pl-item:hover::after{opacity:.75}
-.pl-item.sel{outline:2px solid #fff;outline-offset:1px}
+.pl-item.sel{outline:2px solid var(--accent);outline-offset:2px}
 .pl-item.leaf{border-radius:999px}
 .pl-desc{font-size:9.5px;color:var(--fg3);padding:0 1px 7px;line-height:1.5}
 
@@ -736,8 +738,8 @@ button:disabled{opacity:.35;cursor:default}
 
 .block{
   position:relative;min-width:158px;max-width:100%;
-  border-radius:8px;background:var(--bc,#3b4252);
-  color:#fff;user-select:none;font-weight:600;
+  border-radius:8px;background:var(--bc-face,var(--bc,#3b4252));
+  color:var(--bc-fg,#fff);user-select:none;font-weight:600;
   box-shadow:0 2px 0 rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.14);
 }
 /* 顶部凹槽（用工作区底色挖出来） */
@@ -749,7 +751,7 @@ button:disabled{opacity:.35;cursor:default}
 /* 底部凸起 */
 .block::before{
   content:"";position:absolute;left:21px;bottom:-7px;width:18px;height:7px;
-  background:var(--bc,#3b4252);border-radius:0 0 7px 7px;
+  background:var(--bc-face,var(--bc,#3b4252));border-radius:0 0 7px 7px;
   box-shadow:inset 0 -1px 0 rgba(0,0,0,.2);pointer-events:none;
 }
 .block>.bh{
@@ -757,11 +759,14 @@ button:disabled{opacity:.35;cursor:default}
   padding:11px 13px 8px;font-size:11.5px;font-weight:700;
   cursor:grab;line-height:1.35;
 }
-.block>.bh .lbl{text-shadow:0 1px 0 rgba(0,0,0,.25);white-space:nowrap}
+/* panels.css 里有条裸的 .lbl{color:var(--muted)}，会把积木名压成灰色：
+   浅色主题下 #74839a 落在紫积木上只有 1.04:1，正是「明亮模式看不清积木上的字」。
+   积木里的文字一律用对比度算出来的 --bc-fg，不吃全局灰。 */
+.block>.bh .lbl{color:var(--bc-fg,#fff);text-shadow:var(--bc-shadow,0 1px 0 rgba(0,0,0,.25));white-space:nowrap}
 .block .dot,.block .badge,.block .caret{display:none}
 .block .more{
   width:18px;height:18px;margin-left:auto;border-radius:50%;opacity:0;
-  color:rgba(255,255,255,.85);font-size:14px;line-height:1;
+  color:var(--bc-dim,rgba(255,255,255,.85));font-size:14px;line-height:1;
   display:grid;place-items:center;background:transparent;
 }
 .block:hover .more{opacity:.85}
@@ -776,7 +781,7 @@ button:disabled{opacity:.35;cursor:default}
 }
 .block .bslot>.row{display:flex;flex-direction:column;gap:4px}
 .bslot .row>.k{
-  font-size:9.5px;font-weight:600;color:rgba(255,255,255,.72);
+  font-size:9.5px;font-weight:600;color:var(--bc-dim,rgba(255,255,255,.72));
   letter-spacing:.2px;
 }
 .bslot .stack.nested{
@@ -785,11 +790,16 @@ button:disabled{opacity:.35;cursor:default}
 }
 .block.leaf{
   border-radius:15px;
-  background:var(--bc,#3b4252);
+  background:var(--bc-face,var(--bc,#3b4252));
   box-shadow:0 2px 0 rgba(0,0,0,.26),inset 0 1px 0 rgba(255,255,255,.18);
 }
 .block.leaf::before,.block.leaf::after{display:none}
 .block.leaf>.bh{padding:7px 12px;font-size:11px}
+
+/* 事件帽子：顶部圆弧，放在最外层才会触发 */
+.block.hat{border-radius:22px 22px 8px 8px}
+.block.hat::after{left:16px;width:24px;height:9px;border-radius:0 0 11px 11px}
+.block.hat>.bh{padding-top:14px}
 
 /* 参数输入：Scratch 白色胶囊 */
 .pin{
@@ -809,10 +819,10 @@ button:disabled{opacity:.35;cursor:default}
 .pin.sel option{background:#fff;color:#111}
 .bslot .pin{max-width:100%}
 .bslot .pin.num,.bslot .pin.txt{max-width:180px}
-.block .bh .k{font-size:9.5px;font-weight:600;color:rgba(255,255,255,.7);margin-left:2px}
+.block .bh .k{font-size:9.5px;font-weight:600;color:var(--bc-dim,rgba(255,255,255,.7));margin-left:2px}
 
 .exprmini{
-  display:inline-flex;align-items:center;gap:4px;background:#cf63cf;color:#fff;
+  display:inline-flex;align-items:center;gap:4px;background:var(--bc-face,#cf63cf);color:var(--bc-fg,#fff);
   border:1px solid rgba(0,0,0,.22);border-radius:999px;padding:2px 9px;cursor:pointer;
   font-family:var(--mono);font-size:10px;font-weight:600;
   max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
@@ -824,14 +834,14 @@ button:disabled{opacity:.35;cursor:default}
 .block-head{
   position:relative;min-width:176px;max-width:100%;
   border-radius:20px 20px 8px 8px / 26px 26px 8px 8px;
-  background:linear-gradient(180deg,color-mix(in srgb,var(--bc,#3b4252) 92%,#fff 8%),var(--bc,#3b4252));
+  background:linear-gradient(180deg,color-mix(in srgb,var(--bc-face,var(--bc,#3b4252)) 92%,#fff 8%),var(--bc-face,var(--bc,#3b4252)));
   box-shadow:0 3px 0 rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.2);
-  color:#fff;
+  color:var(--bc-fg,#fff);
 }
 .block-head>.bh{display:flex;align-items:center;gap:7px;padding:11px 12px 8px;font-size:11.5px;font-weight:700}
-.block-head .dot{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.85);flex:none}
-.block-head .lbl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.block-head .more{width:18px;height:18px;border-radius:50%;color:rgba(255,255,255,.85);font-size:13px;opacity:.6}
+.block-head .dot{width:7px;height:7px;border-radius:50%;background:var(--bc-fg,rgba(255,255,255,.85));flex:none}
+.block-head .lbl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--bc-fg,#fff)}
+.block-head .more{width:18px;height:18px;border-radius:50%;color:var(--bc-dim,rgba(255,255,255,.85));font-size:13px;opacity:.6}
 .block-head .more:hover{background:rgba(0,0,0,.22);opacity:1}
 
 .dropzone{height:8px;border-radius:5px;margin:-2px 0;flex:0 0 8px;transition:background .1s}

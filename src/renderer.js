@@ -34,12 +34,13 @@ function layout(ctx, units, size, weight, ls, align) {
    ============================================================ */
 export function render(scene, ctx, env) {
   const ir = scene.ir;
+  const stage = scene.stage || ir.project;
   ctx.save();
-  ctx.clearRect(0, 0, ir.project.width, ir.project.height);
+  ctx.clearRect(0, 0, stage.width, stage.height);
 
-  // 背景
-  ctx.fillStyle = ir.project.background || '#000';
-  ctx.fillRect(0, 0, ir.project.width, ir.project.height);
+  // 背景（switchBackdrop 会改写 scene.stage.background）
+  ctx.fillStyle = stage.background || ir.project.background || '#000';
+  ctx.fillRect(0, 0, stage.width, stage.height);
 
   // 安全区参考线（仅编辑态）
   if (env && env.showSafeArea) {
@@ -56,7 +57,7 @@ export function render(scene, ctx, env) {
   for (const lid of order) {
     const ls = scene.layers[lid];
     if (!ls || !ls.visible) continue;
-    drawLayer(ls, ctx, env);
+    drawLayer(ls, ctx, env, scene);
   }
 
   // 选中高亮框（仅编辑态）
@@ -91,34 +92,64 @@ function bbox(ls, ir) {
     const base = ls.data.base || p;
     return { x: (base.x || 0) - 20, y: (base.y || 0) - 20, w: (base.w || 300), h: (base.h || 300) };
   }
+  const sx = Math.abs(p.scaleX == null ? 1 : p.scaleX);
+  const sy = Math.abs(p.scaleY == null ? 1 : p.scaleY);
   if (ls.type === 'text') {
     const size = p.fontSize || 96;
-    const w = Math.max(120, String(p.text || '').length * size * 0.6);
-    return { x: (p.x || 0) - w / 2, y: (p.y || 0) - size * 0.8, w, h: size * 1.6 };
+    const w = Math.max(120, String(p.text || '').length * size * 0.6) * sx;
+    return { x: (p.x || 0) - w / 2, y: (p.y || 0) - size * 0.8 * sy, w, h: size * 1.6 * sy };
   }
-  return { x: (p.x || 0) - (p.w || 100) / 2, y: (p.y || 0) - (p.h || 100) / 2, w: p.w || 100, h: p.h || 100 };
+  const w = (p.w || 100) * sx, h = (p.h || 100) * sy;
+  return { x: (p.x || 0) - w / 2, y: (p.y || 0) - h / 2, w, h };
 }
 
 /* ---------- 单个图层 ---------- */
-function drawLayer(ls, ctx, env) {
+function drawLayer(ls, ctx, env, scene, ignoreMask = false) {
   const p = ls.p;
   const alpha = clamp01(p.opacity == null ? 1 : p.opacity);
   if (alpha <= 0.001) return;
   // 缩放到 0 的图层不绘制（scaleIn 的起点）
   if (ls.fx.scale != null && ls.fx.scale <= 0.002) return;
 
+  const mask = !ignoreMask && ls.mask && scene ? scene.layers[ls.mask] : null;
+  if (mask && mask.visible && mask !== ls) {
+    drawMasked(ls, mask, ctx, env, scene);
+    return;
+  }
+  drawLayerContent(ls, ctx, env);
+}
+
+function drawLayerContent(ls, ctx, env) {
+  const p = ls.p;
+  const alpha = clamp01(p.opacity == null ? 1 : p.opacity);
+  if (alpha <= 0.001) return;
+  if (ls.fx.scale != null && ls.fx.scale <= 0.002) return;
+
   ctx.save();
   ctx.globalAlpha = alpha;
 
+  // 矩形裁剪按舞台坐标计算
+  if (ls.clip) {
+    ctx.beginPath();
+    ctx.rect(ls.clip.x, ls.clip.y, ls.clip.w, ls.clip.h);
+    ctx.clip();
+  }
+  applyEffects(ctx, ls.effects);
+  if (ls.blend && ls.blend !== 'source-over') ctx.globalCompositeOperation = ls.blend;
+
+  // 数据驱动层的绘制指令顺序与旧版保持一致：在图层变换之前自行平移
   if (ls.data) { drawData(ls, ctx, env); ctx.restore(); return; }
 
   const cx = p.x || 0, cy = p.y || 0;
   const rot = (p.rotation || 0) * Math.PI / 180;
   const sc = ls.fx.scale == null ? 1 : ls.fx.scale;
+  const sx = sc * (p.scaleX == null ? 1 : p.scaleX);
+  const sy = sc * (p.scaleY == null ? 1 : p.scaleY);
+  if (Math.abs(sx) <= 0.002 || Math.abs(sy) <= 0.002) { ctx.restore(); return; }
 
   ctx.translate(cx, cy);
   if (rot) ctx.rotate(rot);
-  if (sc !== 1) ctx.scale(sc, sc);
+  if (sx !== 1 || sy !== 1) ctx.scale(sx, sy);
 
   if (ls.type === 'text') drawText(ls, ctx, env);
   else if (ls.type === 'circle') {
@@ -126,7 +157,7 @@ function drawLayer(ls, ctx, env) {
     ctx.beginPath();
     ctx.arc(0, 0, Math.min(w, h) / 2, 0, Math.PI * 2);
     fillAndStroke(ctx, p);
-  } else if (ls.type === 'image') {
+  } else if (ls.type === 'image' || ls.type === 'sprite') {
     drawImageLayer(ls, ctx);
   } else {
     const w = p.w || 100, h = p.h || 100;
@@ -136,6 +167,82 @@ function drawLayer(ls, ctx, env) {
   }
 
   ctx.restore();
+}
+
+function applyEffects(ctx, effects) {
+  if (!effects) return;
+  const filters = [];
+  if (effects.brightness != null && effects.brightness !== 100) filters.push(`brightness(${effects.brightness}%)`);
+  if (effects.saturation != null && effects.saturation !== 100) filters.push(`saturate(${effects.saturation}%)`);
+  if (effects.contrast != null && effects.contrast !== 100) filters.push(`contrast(${effects.contrast}%)`);
+  if (effects.color) filters.push(`hue-rotate(${effects.color}deg)`);
+  if (effects.blur > 0) filters.push(`blur(${effects.blur}px)`);
+  if (filters.length) ctx.filter = filters.join(' ');
+  if (effects.glow > 0) {
+    ctx.shadowColor = effects.glowColor || '#4a8cff';
+    ctx.shadowBlur = effects.glow;
+  }
+  if (effects.shadow > 0) {
+    ctx.shadowColor = effects.shadowColor || 'rgba(0,0,0,.5)';
+    ctx.shadowBlur = effects.shadow;
+    ctx.shadowOffsetY = Math.max(2, effects.shadow * 0.35);
+  }
+}
+
+/* 遮罩：有 DOM 时走离屏合成，headless 退化为按遮罩外形裁剪。 */
+function drawMasked(ls, mask, ctx, env, scene) {
+  const ir = scene.ir;
+  const b = bbox(ls, ir);
+  const canOffscreen = typeof document !== 'undefined' && typeof document.createElement === 'function'
+    && b.w > 0 && b.h > 0;
+  if (!canOffscreen) {
+    ctx.save();
+    clipMaskShape(ctx, mask, ir);
+    drawLayerContent(ls, ctx, env);
+    ctx.restore();
+    return;
+  }
+  const pad = 24;
+  const x = Math.max(0, Math.floor(b.x - pad));
+  const y = Math.max(0, Math.floor(b.y - pad));
+  const w = Math.min(ir.project.width - x, Math.ceil(b.w + pad * 2));
+  const h = Math.min(ir.project.height - y, Math.ceil(b.h + pad * 2));
+  if (w <= 0 || h <= 0) return;
+  try {
+    const off = document.createElement('canvas');
+    off.width = w; off.height = h;
+    const octx = off.getContext('2d');
+    octx.translate(-x, -y);
+    drawLayerContent(ls, octx, env);
+
+    const mcv = document.createElement('canvas');
+    mcv.width = w; mcv.height = h;
+    const mctx = mcv.getContext('2d');
+    mctx.translate(-x, -y);
+    drawLayerContent(mask, mctx, env);
+
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.globalCompositeOperation = 'destination-in';
+    octx.drawImage(mcv, 0, 0);
+    ctx.drawImage(off, x, y);
+  } catch {
+    ctx.save();
+    clipMaskShape(ctx, mask, ir);
+    drawLayerContent(ls, ctx, env);
+    ctx.restore();
+  }
+}
+
+function clipMaskShape(ctx, mask, ir) {
+  const b = bbox(mask, ir);
+  if (mask.type === 'circle') {
+    ctx.beginPath();
+    ctx.arc(b.x + b.w / 2, b.y + b.h / 2, Math.min(b.w, b.h) / 2, 0, Math.PI * 2);
+  } else {
+    ctx.beginPath();
+    ctx.rect(b.x, b.y, b.w, b.h);
+  }
+  ctx.clip();
 }
 
 function fillAndStroke(ctx, p) {
@@ -355,11 +462,11 @@ function drawData(ls, ctx, env) {
   const d = ls.data;
   if (!d) return;
   const base = d.base || ls.p;
-  const bx = base.x || 0, by = base.y || 0;
   const t = env.time;
 
+  // 数据层在图层变换之前绘制，位置取运行时的 p（运动积木可移动数据层）
   ctx.save();
-  ctx.translate(bx, by);
+  ctx.translate(ls.p.x == null ? (base.x || 0) : ls.p.x, ls.p.y == null ? (base.y || 0) : ls.p.y);
 
   switch (d.kind) {
     /* 数据柱状图（growBar） */
@@ -481,11 +588,36 @@ function drawData(ls, ctx, env) {
         const age = t - pt.delay;
         if (age < 0 || age > pt.life * life) continue;
         const k = age / (pt.life * life);
-        const x = pt.x + pt.vx * age;
-        const y = pt.y + pt.vy * age + 120 * age * age;
-        ctx.globalAlpha = (1 - k) * 0.9;
+        const alpha = (1 - k) * 0.9;
+        const radius = pt.r * (1 - k * 0.5);
+        let x, y;
+        if (pt.xs && d.trailFps) {
+          // 固定步长模拟的轨迹：按 trailFps 采样后线性插值到当前时刻
+          const f = age * d.trailFps;
+          const i0 = Math.min(pt.xs.length - 1, Math.floor(f));
+          const i1 = Math.min(pt.xs.length - 1, i0 + 1);
+          const fr = f - i0;
+          x = pt.xs[i0] + (pt.xs[i1] - pt.xs[i0]) * fr;
+          y = pt.ys[i0] + (pt.ys[i1] - pt.ys[i0]) * fr;
+          const trail = Math.max(2, Math.round(d.trailFps * 0.15));
+          ctx.strokeStyle = mixHex(d.color || '#4a8cff', '#ffffff', k * 0.5);
+          ctx.lineWidth = Math.max(1, radius * 0.55);
+          for (let s = 0; s < trail; s++) {
+            const a = i0 - s, b = a - 1;
+            if (b < 0) break;
+            ctx.globalAlpha = alpha * (1 - s / trail) * 0.45;
+            ctx.beginPath();
+            ctx.moveTo(pt.xs[a], pt.ys[a]);
+            ctx.lineTo(pt.xs[b], pt.ys[b]);
+            ctx.stroke();
+          }
+        } else {
+          x = pt.x + pt.vx * age;
+          y = pt.y + pt.vy * age + 120 * age * age;
+        }
+        ctx.globalAlpha = alpha;
         ctx.fillStyle = mixHex(d.color || '#4a8cff', '#ffffff', k * 0.5);
-        ctx.beginPath(); ctx.arc(x, y, pt.r * (1 - k * 0.5), 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill();
       }
       break;
     }

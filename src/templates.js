@@ -22,7 +22,7 @@ function blk(op, values) {
       label: sd.label,
       placeholder: sd.placeholder,
       menu: sd.menu || null,
-      value: isSub ? [] : (values[i] !== undefined ? values[i] : defaultForType(sd.type)),
+      value: isSub ? [] : (values[i] !== undefined ? values[i] : defaultForType(sd.type, sd.default)),
     });
   });
   return { id: uid('B'), k: 'C', op, slots };

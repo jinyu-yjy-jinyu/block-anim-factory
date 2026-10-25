@@ -344,7 +344,7 @@ export function run() {
     eq(d.bars[0].p, 1, '第一根应已长满');
     eq(d.bars[3].p, 1, '第四根在 t=2.5 应已长满');
   });
-  t('求值:wait 推进时间游标', () => {
+  t('求值:wait 真正阻塞后续积木', () => {
     const ir = defaultProject('t');
     ir.layers[2].blocks = [
       { id: 'w', k: 'C', op: 'wait', slots: [{ type: 'time', value: TIME(2) }] },
@@ -358,11 +358,13 @@ export function run() {
       ] },
     ];
     const audio = new AudioSource({ bpm: 120, duration: 6 });
-    // t=1：块还没开始（等待 2s），但 executeBlock 对 wait 直接推进游标并继续求值，
-    // 因此 growBar 会在游标 2s 处求值 → 第一根应已长满
+    // 运行时里 wait 会真正挂起线程：t=1 时后续积木还没执行
     const at1 = evaluateFrame(ir, 1, audio).state.layers[ir.layers[2].id].data;
-    truthy(at1 && at1.bars.length === 2, '柱数应为 2');
-    eq(at1.bars[0].p, 1, 'wait 之后应立即开始生长');
+    truthy(!at1 || !at1.bars, 'wait 未结束时不应开始生长');
+    // t=2.5：growBar 从 2s 开始、生长 0.5s，第一根应已长满
+    const at25 = evaluateFrame(ir, 2.5, audio).state.layers[ir.layers[2].id].data;
+    truthy(at25 && at25.bars.length === 2, 'wait 结束后应产出柱子');
+    eq(at25.bars[0].p, 1, 'wait 2s 后生长 0.5s，t=2.5 应已长满');
   });
   t('求值:音频变量有界', () => {
     const audio = new AudioSource({ bpm: 120, duration: 6, seed: 7, intensity: 1 });

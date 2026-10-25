@@ -100,6 +100,181 @@ ok(blockCount > 0, `积木画布渲染出 ${blockCount} 个积木`);
 ok((await page.locator('#ruler .tick').count()) > 0, '时间轴刻度已渲染');
 ok((await page.locator('#markerLayer .marker').count()) > 0, '标记点已渲染');
 
+/* ---------- 2.1 积木可读性 ---------- */
+console.log('\n=== 2.1 积木可读性（深色 / 浅色） ===');
+await page.locator('#rightTabs .tab[data-tab="blocks"]').click();
+await page.waitForTimeout(200);
+const contrastProbe = await page.evaluate(async () => {
+  const A = window.BlockAnim;
+  const tick = () => new Promise(r => setTimeout(r, 8));
+
+  function parseColor(s) {
+    if (!s) return null;
+    s = s.trim();
+    if (s.startsWith('#')) {
+      let h = s.slice(1);
+      if (h.length === 3) h = h.split('').map(c => c + c).join('');
+      const a = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+      return { r: parseInt(h.slice(0, 2), 16), g: parseInt(h.slice(2, 4), 16), b: parseInt(h.slice(4, 6), 16), a };
+    }
+    const m = s.match(/rgba?\(([^)]+)\)/);
+    if (!m) return null;
+    const p = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+    return { r: p[0], g: p[1], b: p[2], a: p[3] == null ? 1 : p[3] };
+  }
+  function same(a, b) {
+    return !!a && !!b && Math.abs(a.r - b.r) < 1 && Math.abs(a.g - b.g) < 1 && Math.abs(a.b - b.b) < 1;
+  }
+  function lum(c) {
+    const f = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+  }
+  function over(fg, bg) {
+    const a = fg.a == null ? 1 : fg.a;
+    return { r: fg.r * a + bg.r * (1 - a), g: fg.g * a + bg.g * (1 - a), b: fg.b * a + bg.b * (1 - a), a: 1 };
+  }
+  function ratio(fg, bg) {
+    const x = lum(over(fg, bg)), y = lum(bg);
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  }
+  function mix(a, b, t) {
+    return { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: 1 };
+  }
+
+  const entries = [];
+  const dotSamples = [];
+  const readFace = (el, kind, theme) => {
+    const cs = getComputedStyle(el);
+    const face = parseColor(cs.getPropertyValue('--bc-face'));
+    const fg = parseColor(cs.getPropertyValue('--bc-fg'));
+    const color = parseColor(cs.color);
+    const bg = parseColor(cs.backgroundColor);
+    if (!face || !fg || !color) return;
+    const under = bg && bg.a > 0.01 ? bg : face;
+    entries.push({
+      theme, kind,
+      face: cs.getPropertyValue('--bc-face').trim(),
+      fg: cs.getPropertyValue('--bc-fg').trim(),
+      color: cs.color, colorObj: color, fgObj: fg,
+      ratio: ratio(color, under),
+    });
+    for (const dimEl of el.querySelectorAll('.bh .k, .bslot .row > .k')) {
+      const dim = parseColor(getComputedStyle(dimEl).color);
+      if (dim) entries.push({
+        theme, kind: kind + ':dim',
+        face: cs.getPropertyValue('--bc-face').trim(),
+        color: getComputedStyle(dimEl).color,
+        ratio: ratio(dim, face),
+      });
+    }
+    // 真正承载文字的是子元素（.lbl）。只量容器会漏掉一整类 bug：
+    // panels.css 里裸的 .lbl{color:var(--muted)} 把积木名压成灰色，
+    // 容器 color 仍然正确，测试全绿，但浅色主题下人眼看是 1:1 的灰字。
+    for (const textEl of el.querySelectorAll('.bh .lbl')) {
+      const color = parseColor(getComputedStyle(textEl).color);
+      if (!color) continue;
+      const tbg = parseColor(getComputedStyle(textEl).backgroundColor);
+      entries.push({
+        theme, kind: kind + ':text',
+        face: cs.getPropertyValue('--bc-face').trim(),
+        fg: cs.getPropertyValue('--bc-fg').trim(),
+        color: getComputedStyle(textEl).color, colorObj: color, fgObj: fg,
+        ratio: ratio(color, tbg && tbg.a > 0.01 ? tbg : face),
+      });
+    }
+  };
+
+  function sampleDot(theme, dot, on) {
+    const cs = getComputedStyle(dot);
+    const ink = parseColor(cs.color);
+    const cat = parseColor(cs.getPropertyValue('--c'));
+    const cInk = parseColor(cs.getPropertyValue('--c-ink'));
+    const cInkDark = parseColor(cs.getPropertyValue('--c-ink-dark'));
+    const cOn = parseColor(cs.getPropertyValue('--c-on'));
+    if (!ink || !cat) return null;
+    const base = on
+      ? cat
+      : (theme === 'light' ? mix(parseColor('#f2f6fb'), cat, 0.18) : mix(parseColor('#0c0f14'), cat, 0.16));
+    const expected = on ? cOn : (theme === 'light' ? cInk : cInkDark);
+    return {
+      theme, cat: dot.dataset.cat, on,
+      ratio: ratio(ink, base),
+      match: same(ink, expected),
+    };
+  }
+
+  for (const theme of ['dark', 'light']) {
+    A.setTheme(theme);
+    await tick();
+    const dots = [...document.querySelectorAll('#catRail .cat-dot')];
+    const seenCats = new Set();
+    for (const dot of dots) {
+      dot.click();
+      await tick();
+      let items = [...document.querySelectorAll('#paletteBody .pl-item')];
+      if (!items.length) { dot.click(); await tick(); items = [...document.querySelectorAll('#paletteBody .pl-item')]; }
+      if (items.length) seenCats.add(dot.dataset.cat);
+      for (const it of items) readFace(it, `palette:${dot.dataset.cat}`, theme);
+      const activeSample = sampleDot(theme, dot, dot.classList.contains('on'));
+      if (activeSample) dotSamples.push(activeSample);
+    }
+    const openDot = document.querySelector('#catRail .cat-dot.on');
+    if (openDot) openDot.click();
+    await tick();
+    for (const dot of dots) {
+      const idleSample = sampleDot(theme, dot, false);
+      if (idleSample) dotSamples.push(idleSample);
+    }
+
+    for (const el of document.querySelectorAll('#blockCanvas .block')) readFace(el, `block:${el.dataset.op || '?'}`, theme);
+    for (const el of document.querySelectorAll('#blockCanvas .block-head')) readFace(el, 'head', theme);
+    entries.push({ theme, kind: 'meta', seenCats: seenCats.size, dotCount: dots.length });
+  }
+  A.setTheme('dark');
+  return { entries, dotSamples };
+});
+
+const contrastEntries = contrastProbe.entries.filter(e => e.kind !== 'meta');
+const metaEntries = contrastProbe.entries.filter(e => e.kind === 'meta');
+const textEntries = contrastEntries.filter(e => !e.kind.endsWith(':dim'));
+const dimEntries = contrastEntries.filter(e => e.kind.endsWith(':dim'));
+const paletteEntries = textEntries.filter(e => e.kind.startsWith('palette:'));
+const blockEntries = textEntries.filter(e => e.kind.startsWith('block:'));
+const headEntries = textEntries.filter(e => e.kind === 'head');
+const minText = Math.min(...textEntries.map(e => e.ratio));
+const minDim = dimEntries.length ? Math.min(...dimEntries.map(e => e.ratio)) : 99;
+ok(paletteEntries.length >= 20, `积木库读取到 ${paletteEntries.length} 个可读性样本`);
+ok(blockEntries.length > 0, `积木画布读取到 ${blockEntries.length} 个积木`);
+ok(headEntries.length > 0, `图层头读取到 ${headEntries.length} 个`);
+ok(dimEntries.length > 0, `读取到 ${dimEntries.length} 个次级参数名`);
+ok(minText >= 4.5, `积木主文字最低对比度 ${minText.toFixed(2)}:1（应 ≥4.5）`);
+ok(minDim >= 3, `积木次级文字最低对比度 ${minDim.toFixed(2)}:1（应 ≥3）`);
+const textOnly = contrastEntries.filter(e => e.kind.endsWith(':text'));
+ok(textOnly.filter(e => e.theme === 'light').length >= 12 && textOnly.filter(e => e.theme === 'dark').length >= 12,
+  `量到积木名子元素样本 浅色 ${textOnly.filter(e => e.theme === 'light').length} / 深色 ${textOnly.filter(e => e.theme === 'dark').length}`);
+ok(textEntries.every(e => sameColor(e.colorObj, e.fgObj)),
+  '积木文字实际颜色等于 --bc-fg（CSS 确实消费了变量）',
+  textEntries.filter(e => !sameColor(e.colorObj, e.fgObj)).slice(0, 2).map(e => `${e.theme}/${e.kind}: ${e.color} != ${e.fg}`).join(' | '));
+ok(textEntries.filter(e => e.theme === 'light' && e.kind === 'palette:text').length > 0 &&
+  textEntries.filter(e => e.theme === 'light' && e.kind === 'palette:text').every(e => e.ratio >= 4.5),
+  '浅色主题紫色积木库文字达标');
+for (const meta of metaEntries) {
+  ok(meta.seenCats >= 8, `${meta.theme === 'light' ? '浅色' : '深色'}主题打开 ${meta.seenCats}/${meta.dotCount} 个分类的积木库`);
+}
+const dotMismatch = contrastProbe.dotSamples.filter(s => !s.match);
+for (const theme of ['dark', 'light']) {
+  const samples = contrastProbe.dotSamples.filter(s => s.theme === theme);
+  const min = samples.length ? Math.min(...samples.map(s => s.ratio)) : 0;
+  ok(samples.length >= 8, `${theme === 'light' ? '浅色' : '深色'}色轨采样 ${samples.length} 项`);
+  ok(min >= 3, `${theme === 'light' ? '浅色' : '深色'}分类色轨图标最低对比度 ${min.toFixed(2)}:1（应 ≥3）`);
+}
+ok(dotMismatch.length === 0, '色轨图标实际颜色与 --c-ink/--c-on 一致',
+  dotMismatch.slice(0, 3).map(s => `${s.theme}/${s.cat}${s.on ? '(on)' : ''}`).join(', '));
+
+function sameColor(a, b) {
+  return !!a && !!b && Math.abs(a.r - b.r) < 1 && Math.abs(a.g - b.g) < 1 && Math.abs(a.b - b.b) < 1;
+}
+
 /* ---------- 3. 舞台真的画出了东西 ---------- */
 console.log('\n=== 3. 渲染 ===');
 async function stageStats() {

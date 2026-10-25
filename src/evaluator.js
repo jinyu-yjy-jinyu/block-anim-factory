@@ -14,8 +14,44 @@ import { defOf } from './blocks.js';
 import { expandCustomBlocks } from './customblocks.js';
 
 /* ---------------- 缓动 ---------------- */
+/* CSS cubic-bezier：x 轴必须单调，用牛顿迭代 + 二分兜底求参数 u。 */
+export function cubicBezier(t, x1, y1, x2, y2) {
+  const cx = 3 * clamp01(x1);
+  const bx = 3 * (clamp01(x2) - clamp01(x1)) - cx;
+  const ax = 1 - cx - bx;
+  const cy = 3 * y1;
+  const by = 3 * (y2 - y1) - cy;
+  const ay = 1 - cy - by;
+  const sampleX = (u) => ((ax * u + bx) * u + cx) * u;
+  const sampleY = (u) => ((ay * u + by) * u + cy) * u;
+  const slopeX = (u) => (3 * ax * u + 2 * bx) * u + cx;
+  const want = clamp01(t);
+  let u = want;
+  for (let i = 0; i < 8; i++) {
+    const err = sampleX(u) - want;
+    if (Math.abs(err) < 1e-6) return sampleY(u);
+    const slope = slopeX(u);
+    if (Math.abs(slope) < 1e-6) break;
+    u -= err / slope;
+    if (u < 0 || u > 1) break;
+  }
+  let lo = 0, hi = 1;
+  u = want;
+  for (let i = 0; i < 30; i++) {
+    const x = sampleX(u);
+    if (Math.abs(x - want) < 1e-6) break;
+    if (x < want) lo = u; else hi = u;
+    u = (lo + hi) / 2;
+  }
+  return sampleY(u);
+}
+
 export function ease(name, x) {
   const t = clamp01(x);
+  if (typeof name === 'string' && name.startsWith('bezier:')) {
+    const [x1, y1, x2, y2] = name.slice(7).split(',').map(Number);
+    return cubicBezier(t, x1 || 0, y1 || 0, x2 == null ? 1 : x2, y2 == null ? 1 : y2);
+  }
   switch (name) {
     case 'linear': return t;
     case 'inQuad': return t * t;
@@ -278,6 +314,22 @@ export function evalExpr(e, ctx) {
         case 'frame': return ctx.vars.get('$frame');
         case 'time': return ctx.t;
         case 'progress': return ctx.vars.get('$progress');
+        case 'round': return Math.round(num(A()));
+        case 'tan': return Math.tan(num(A()));
+        case 'listLength': {
+          const arr = ctx.getList ? ctx.getList(String(A())) : [];
+          return arr.length;
+        }
+        case 'itemOf': {
+          const arr = ctx.getList ? ctx.getList(String(A())) : [];
+          const i = Math.round(num(B())) - 1;
+          return i >= 0 && i < arr.length ? arr[i] : '';
+        }
+        case 'listContains': {
+          const arr = ctx.getList ? ctx.getList(String(A())) : [];
+          const want = String(B());
+          return arr.some(x => String(x) === want);
+        }
         case 'gt': return num(A()) > num(B());
         case 'lt': return num(A()) < num(B());
         case 'eq': return num(A()) === num(B());
@@ -669,6 +721,19 @@ export function execBlock(b, ctx, state, curLayerId, t) {
     }
 
     /* ---------- 数据驱动图形 ---------- */
+    case 'drawShape': {
+      const lid = resolveTarget(ctx, String(E(0) ?? ''), curLayerId);
+      const ls = state.layers[lid];
+      if (!ls) return t;
+      const fill = String(evalExpr(S(1), ctx) ?? '#4a8cff');
+      ls.p.fill = fill;
+      ls.p.color = fill;
+      ls.p.w = Math.max(0, num(E(2), ls.p.w ?? 400));
+      ls.p.h = Math.max(0, num(E(3), ls.p.h ?? 120));
+      ls.p.radius = Math.max(0, num(E(4), ls.p.radius ?? 0));
+      ls.visible = true;
+      return t;
+    }
     case 'growBar': {
       const lid = resolveTarget(ctx, String(E(0) ?? ''), curLayerId);
       const ls = state.layers[lid];
@@ -783,17 +848,16 @@ export function execBlock(b, ctx, state, curLayerId, t) {
     }
 
     default: {
-      // 未知 op：当作表达式处理，便于扩展而不破坏工程
-      const v = evalExpr({ k: 'blk', op, a: S(0), b: S(1), c: S(2), p: S(3), p2: S(4) }, ctx);
-      if (v !== 0) ls_setProp(state, curLayerId, 'opacity', num(v, 1));
+      // 未知语句积木：不猜语义、不改画面。旧实现把它当表达式求值并写 opacity，
+      // 拼错 op 或载入新版本积木时会静默让图层变透明，很难排查。
+      ctx.unknownOps = ctx.unknownOps || new Set();
+      if (!ctx.unknownOps.has(op)) {
+        ctx.unknownOps.add(op);
+        if (ctx.hooks.onLog) ctx.hooks.onLog('warn', `未实现的积木已跳过：${op}`);
+      }
       return t;
     }
   }
-}
-
-function ls_setProp(state, lid, key, val) {
-  const ls = state.layers[lid];
-  if (ls) ls.p[key] = val;
 }
 
 function findMarker(ir, name) {
@@ -855,15 +919,12 @@ export function parseData(s) {
 }
 
 /* ============================================================
-   对外主入口：evaluateFrame
+   旧版逐帧求值（legacyEvaluateFrame）
    ------------------------------------------------------------
-   时间是纯函数输入，因此：
-   · 预览播放   → 连续调用
-   · 单步调试   → t += 1/fps
-   · 导出逐帧   → t = i/fps
-   三条路径走的是同一份代码 → 预览与成片天然一致。
+   保留它作为对照实现：M1 之后预览/导出已经全部走 runtime.js，
+   这里仍可用于回归比较与表达式/旧效果的公式核对。
    ============================================================ */
-export function evaluateFrame(ir, t, audio, hooks = {}) {
+export function legacyEvaluateFrame(ir, t, audio, hooks = {}) {
   const ctx = new EvalContext(ir, t, audio, hooks);
   const state = blankScene(ir);
   state.t = t;
@@ -915,3 +976,9 @@ export function evaluateFrame(ir, t, audio, hooks = {}) {
   state.extras = state.extras || {};
   return { state, ctx };
 }
+
+/* 对外主入口改为运行时解释器（runtime.js）。
+   旧测试与脚本仍从 evaluator 导入，因此在文件末尾做一次 re-export。 */
+export {
+  evaluateFrame, createRuntime, resetEvaluationCache,
+} from './runtime.js';

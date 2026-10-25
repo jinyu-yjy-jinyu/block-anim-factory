@@ -5,7 +5,7 @@
    这里只做「把 canvas 换成成片尺寸 → 逐帧求值 → 取像素」。
    ============================================================ */
 
-import { evaluateFrame } from './evaluator.js';
+import { createRuntime } from './runtime.js';
 import { render } from './renderer.js';
 import { encodeGIF } from './gif.js';
 import { createZip } from './zip.js';
@@ -30,16 +30,21 @@ export function toBlob(canvas, type = 'image/png') {
   });
 }
 
-function drawFrame(ir, audio, t, canvas, scale = 1, env = {}) {
+/* 每个导出任务使用独立 runtime：不共享预览缓存，也不会触发预览声音。 */
+function exportRuntime(ir, audio) {
+  return createRuntime(ir, audio, { sound: null });
+}
+
+function drawFrame(ir, audio, t, canvas, scale = 1, env = {}, rt = null) {
   const w = Math.round(ir.project.width * scale);
   const h = Math.round(ir.project.height * scale);
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   const ctx = canvas.getContext('2d');
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
-  const { state } = evaluateFrame(ir, t, audio);
-  state.ir = ir;
-  state.order = ir.layers.map(l => l.id);
-  render(state, ctx, Object.assign({ time: t }, env));
+  const runtime = rt || exportRuntime(ir, audio);
+  runtime.advanceTo(t);
+  const state = runtime.compose();
+  render(state, ctx, Object.assign({ time: state.t }, env));
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   return canvas;
 }
@@ -60,7 +65,7 @@ export async function exportPNG(ir, audio, t, scale = 1) {
     Math.round(ir.project.width * scale),
     Math.round(ir.project.height * scale),
   );
-  drawFrame(ir, audio, t, c, scale, {});
+  drawFrame(ir, audio, t, c, scale, {}, exportRuntime(ir, audio));
   return toBlob(c, 'image/png');
 }
 
@@ -76,11 +81,12 @@ export async function exportFrames(ir, audio, opts, onProgress, shouldCancel) {
   const c = offscreen(Math.round(ir.project.width * scale), Math.round(ir.project.height * scale));
   const entries = [];
   const pad = String(total).length;
+  const rt = exportRuntime(ir, audio);
 
   for (let f = from; f < to; f++) {
     if (shouldCancel && shouldCancel()) throw new Error('已取消');
     const t = f / fps;
-    drawFrame(ir, audio, t, c, scale, {});
+    drawFrame(ir, audio, t, c, scale, {}, rt);
     const blob = await toBlob(c, 'image/png');
     const buf = new Uint8Array(await blob.arrayBuffer());
     entries.push({ name: `frames/${opts.name || 'frame'}_${String(f).padStart(pad, '0')}.png`, data: buf });
@@ -112,15 +118,15 @@ export async function exportGIF(ir, audio, opts, onProgress, shouldCancel) {
   const sx = w / ir.project.width, sy = h / ir.project.height;
 
   const frames = [];
+  const rt = exportRuntime(ir, audio);
   for (let f = from; f < to; f++) {
     if (shouldCancel && shouldCancel()) throw new Error('已取消');
     const t = f / fps;
     if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
     ctx.setTransform(sx, 0, 0, sy, 0, 0);
-    const { state } = evaluateFrame(ir, t, audio);
-    state.ir = ir;
-    state.order = ir.layers.map(l => l.id);
-    render(state, ctx, { time: t });
+    rt.advanceTo(t);
+    const state = rt.compose();
+    render(state, ctx, { time: state.t });
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     const img = ctx.getImageData(0, 0, w, h);
     frames.push({ rgba: img.data, delay: Math.round(100 / fps) });

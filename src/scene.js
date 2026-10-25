@@ -67,6 +67,8 @@ export class SceneNode {
     this.blocks = opts.blocks || [];          // 程序化时间轴（与 V0 IR 一致）
     this.exposed = opts.exposed || [];        // 参数暴露（P2-A）
     this.overrides = opts.overrides || null; // 实例对 master 的显式覆盖键
+    this.parent = opts.parent || null;        // IR 运行时的父对象名
+    this.z = opts.z == null ? null : opts.z;  // 显式层级（可选）
   }
 
   get isGroup() { return this.type === 'group'; }
@@ -406,6 +408,8 @@ export class SceneTree {
         opacity: typeof l.props.opacity === 'number' ? l.props.opacity : 1,
         props: Object.assign({}, l.props),
         blocks: l.blocks || [],
+        parent: l.parent || null,
+        z: l.z,
       });
       return n;
     });
@@ -437,6 +441,8 @@ export class SceneTree {
         locked: node.locked,
         props: Object.assign({}, node.props, { opacity: own * inheritOpacity }),
         blocks: node.blocks,
+        parent: node.parent || null,
+        z: node.z == null ? undefined : node.z,
       });
     };
     walk(this.root, true, 1);
@@ -444,7 +450,7 @@ export class SceneTree {
   }
 }
 
-const LAYER_TYPE_MAP = { text: 'text', rect: 'rect', circle: 'ellipse', image: 'image' };
+const LAYER_TYPE_MAP = { text: 'text', rect: 'rect', circle: 'ellipse', image: 'image', sprite: 'image' };
 const LAYER_TYPE_INV = { text: 'text', rect: 'rect', ellipse: 'circle', image: 'image' };
 
 /* ---------- 深拷贝
@@ -472,6 +478,7 @@ function nodeToJSON(n) {
     id: n.id, name: n.name, type: n.type, visible: n.visible, locked: n.locked,
     masterId: n.masterId, props: n.props, blend: n.blend, mask: n.mask,
     opacity: n.opacity, blocks: n.blocks, exposed: n.exposed,
+    parent: n.parent || null, z: n.z,
     children: n.children.map(nodeToJSON),
   };
 }
@@ -481,6 +488,7 @@ function nodeFromJSON(j) {
     id: j.id, name: j.name, type: j.type, visible: j.visible, locked: j.locked,
     masterId: j.masterId, props: j.props, blend: j.blend, mask: j.mask,
     opacity: j.opacity, blocks: j.blocks || [], exposed: j.exposed || [],
+    parent: j.parent || null, z: j.z,
   });
   n.children = (j.children || []).map(nodeFromJSON);
   return n;

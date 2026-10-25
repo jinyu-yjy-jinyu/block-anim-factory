@@ -522,7 +522,13 @@ const loopOf = (n, inner) => ({
   slots: [{ type: 'num', label: '次数', value: IR_NUM(n) }, { type: 'blocks', label: '每次', value: inner }],
 });
 const IR_NUM = (v) => ({ k: 'lit', t: 'num', v });
-const waitBlk = () => ({ id: 'w', k: 'C', op: 'wait', slots: [{ type: 'time', value: { k: 'lit', t: 'time', v: 0.001 } }] });
+const setNumBlk = () => ({
+  id: 'sn', k: 'C', op: 'setVar',
+  slots: [
+    { type: 'str', value: { k: 'lit', t: 'str', v: 'n' } },
+    { type: 'num', value: IR_NUM(1) },
+  ],
+});
 
 t('求值:变量存对象时取回原值（不被当字面量再展开）', () => {
   // 回归：`case 'var'` 里判断是 `'v' in v`，于是用户存进去的任何带 v 字段的
@@ -539,7 +545,8 @@ t('求值:变量存对象时取回原值（不被当字面量再展开）', () =
 t('求值:嵌套 loop 受整帧步数预算约束，不卡死', () => {
   // 回归：loop 的 500 是「每层」上限，嵌套是乘积（500ⁿ）。3 层 = 1.25 亿次
   // 语句执行，实测 27.6 秒卡死界面；4 层根本算不完。
-  let blocks = [waitBlk()];
+  // 这里不能用 wait 当循环体：wait 会挂起线程到下一帧，不再产生单帧积压。
+  let blocks = [setNumBlk()];
   for (let i = 0; i < 4; i++) blocks = [loopOf(500, blocks)];
   let count = 0;
   const t0 = Date.now();
@@ -550,15 +557,15 @@ t('求值:嵌套 loop 受整帧步数预算约束，不卡死', () => {
   ok(count <= ctx.stepBudget + 8, `执行步数 ${count} 超出预算 ${ctx.stepBudget}`);
 });
 t('求值:预算内正常工程不被截断', () => {
-  const blocks = [loopOf(20, [waitBlk()])];
+  const blocks = [loopOf(20, [setNumBlk()])];
   const { ctx } = EV.evaluateFrame(evalIR(blocks), 0, null, {});
   eq(ctx.budgetExceeded, false, '正常工程被误截断');
   eq(ctx.steps, 21, '步数应为 1 层 + 20 次');
 });
 t('求值:步数预算可配置', () => {
-  const blocks = [loopOf(500, [waitBlk()])];
+  const blocks = [loopOf(500, [setNumBlk()])];
   const { ctx } = EV.evaluateFrame(evalIR(blocks), 0, null, { maxSteps: 10 });
-  ok(ctx.steps <= 11, `实际 ${ctx.steps}`);
+  ok(ctx.steps <= 10, `实际 ${ctx.steps}`);
   ok(ctx.budgetExceeded);
 });
 
@@ -696,13 +703,14 @@ t('变量:往返后带 setVar 的积木仍指向正确的槽', () => {
   const back = IR.fromText(IR.toText(ir), BL.BLOCK_DEFS).ir;
   const b = back.layers[0].blocks[0];
   eq(b.op, 'setVar');
-  eq(b.slots.length, 2);
+  eq(b.slots.length, 3);
   eq(b.slots[0].value.t, 'str');
   eq(b.slots[0].value.v, 'score', '变量名槽被写坏');
   eq(b.slots[1].value.k, 'blk');
   eq(b.slots[1].value.op, 'mul');
   eq(b.slots[1].value.a.k, 'var', '变量引用没被保留');
   eq(b.slots[1].value.a.name, 'score');
+  eq(b.slots[2].value.v, 'global', '缺省的作用域槽应补成 global');
 });
 
 t('变量:新增的写变量 op 与积木库定义自洽', () => {
@@ -712,13 +720,14 @@ t('变量:新增的写变量 op 与积木库定义自洽', () => {
   ok(def, 'blocks.js 里没有 setVar');
   eq(def.isLeaf, false);
   ok(BL.PALETTE_GROUPS.includes(def.cat), '分类不在积木库分组里 → 用户找不到它');
-  eq(def.slots.length, 2, '槽位数与 evaluator 读的 E(0)/E(1) 必须一致');
+  eq(def.slots.length, 3, '槽位数与 evaluator 读的 E(0)/E(1)/E(2) 必须一致');
   const meta = BL.metaFor('setVar');
-  eq(meta.slots.length, 2);
+  eq(meta.slots.length, 3);
   const compiled = AI.actionsToBlocks([{ op: 'setVar', slots: { name: IR_STR('score'), value: IR_NUM(5) } }]);
   eq(compiled.skipped.length, 0, `setVar 缺 SLOT_ORDER 映射：${JSON.stringify(compiled.skipped)}`);
   eq(compiled.blocks[0].slots[0].value.v, 'score');
   eq(compiled.blocks[0].slots[1].value.v, 5);
+  eq(compiled.blocks[0].slots[2].value.v, 'global', '未指定作用域时应落到默认 global');
 });
 
 /* ============================================================

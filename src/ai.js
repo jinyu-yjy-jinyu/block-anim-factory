@@ -47,7 +47,22 @@ const ACTION_LEXICON = [
   { re: /(逐词高亮|卡拉\s*ok|karaoke|说到[^\n]{0,3}变色|跟读高亮)/, act: 'highlightWord' },
   { re: /(波形柱|音频柱|音量柱|声波柱|随音乐跳动)/, act: 'audioBars' },
   { re: /(环形频谱|频谱环|圆环频谱|频谱)/, act: 'ringSpectrum' },
+  // —— 事件 / 控制（P0）——
+  { re: /(广播|发消息|发送消息|通知)(?:给)?[^\n]{0,10}/, act: 'broadcast' },
+  { re: /(一直重复|无限循环|循环不停)/, act: 'forever' },
+  // —— 变量 / 列表（P0）——
+  { re: /(变量|得分|计数)[^\n]{0,10}(设为|设置为|改成|等于|赋值为)/, act: 'setVar' },
+  { re: /(变量|得分|计数)[^\n]{0,10}(增加|加上|累加|自增)/, act: 'changeVar' },
+  { re: /(创建|新建|定义)\s*(?:一个|个)?\s*(列表|队列)/, act: 'listCreate' },
+  { re: /(列表|队列)[^\n]{0,8}(加入|添加|追加|新增)/, act: 'listAdd' },
+  // —— 对象与运动（P0）——
+  { re: /(创建|新建|添加)\s*(?:一个|个)?\s*(对象|矩形|圆形|文字|造型|图片)/, act: 'createObject' },
+  { re: /隐藏\s*(?:一下)?\s*(?:对象|图层|它)/, act: 'hideObject' },
+  { re: /显示\s*(?:一下)?\s*(?:对象|图层)/, act: 'showObject' },
+  { re: /(移到|定位到|置于)\s*(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)/, act: 'setPosition' },
+  { re: /(滑行到|滑动到|移动到|飞到)\s*(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)/, act: 'glideTo' },
   // —— 图形 ——
+  // 放在 P0 之后：说「创建一个圆形对象」要认出 createObject，不能被这里的「圆形」抢成 drawShape。
   { re: /(柱状图|柱子|条形图|bar)/, act: 'growBar' },
   { re: /(折线图|折线|曲线图|趋势线)/, act: 'drawLine' },
   { re: /(粒子|散点|雪花|星点)/, act: 'particles' },
@@ -84,15 +99,18 @@ export class NLParser {
 
     // 按标点与连接词切成子句 —— 一句话可能包含多个动作。
     // 连接词要一起吃掉，否则会切出「最后」这种没有意义的碎片。
-    let clauses = src
+    // 「移动到 300,400」里的逗号是坐标分隔符，先换成占位符再切，切完换回来；
+    // 否则坐标会被拆成两个子句，两个都听不懂。
+    const masked = src.replace(/(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d)/g, '$1\u0001$2');
+    let clauses = masked
       .split(/[，,。；;\n]+|然后|接着|最后|之后再|再然后/g)
-      .map(s => s.trim())
+      .map(s => s.replace(/\u0001/g, ',').trim())
       .filter(Boolean);
 
     // 「标题淡入，时长 1.5 秒」里的「时长 1.5 秒」不是独立动作，
     // 它是上一个动作的参数 —— 把这种纯参数子句并回前一个。
     clauses = clauses.reduce((acc, c) => {
-      const isParamOnly = !actionOpOf(c) && /(时长|延迟|间隔|速度|大小|幅度|次数|字号|数量|用|共|为)\s*[\d.]/.test(c);
+      const isParamOnly = !actionOpOf(c) && /(时长|延迟|间隔|间距|速度|大小|幅度|次数|字号|数量|用时|寿命|重力|阻力|扩散|摩擦|反弹|用|共|为)\s*[\d.]/.test(c);
       if (isParamOnly && acc.length) acc[acc.length - 1] += '，' + c;
       else acc.push(c);
       return acc;
@@ -248,30 +266,38 @@ export class NLParser {
         why.push('折线图');
         break;
 
-      case 'particles':
-        slots.layer = this.layerOf(clause);
-        slots.count = NUM(numOf(n => n.unit === '个' || n.unit === '', 90));
-        slots.speed = NUM(numOf(n => n.unit === '', 180));
-        slots.life = NUM(numOf(n => n.unit === '秒' || n.unit === 's', 3));
-        why.push('粒子系统');
+      case 'particles': {
+        const sp = clause.match(/(?:速度|初速)\s*(-?\d+(?:\.\d+)?)/);
+        slots.count = NUM(numOf(n => n.unit === '个', 90));
+        slots.start = TIME(0);
+        slots.life = TIME(numOf(n => n.unit === '秒' || n.unit === 's', 3));
+        slots.speed = NUM(sp ? parseFloat(sp[1]) : numOf(n => n.unit === 'px' || n.unit === '像素', 180));
+        why.push(`粒子系统 ×${slots.count.v}`);
         break;
+      }
 
-      case 'repeater':
-        slots.layer = this.layerOf(clause);
-        slots.count = NUM(numOf(n => n.unit === '个' || n.unit === '', 14));
+      case 'repeater': {
+        const sp = clause.match(/(?:间距|间隔)\s*(-?\d+(?:\.\d+)?)/);
+        slots.count = NUM(numOf(n => n.unit === '个' || n.unit === '次', 14));
+        slots.spacing = NUM(sp ? parseFloat(sp[1]) : numOf(n => n.unit === 'px' || n.unit === '像素', 90));
         slots.gap = TIME(numOf(n => n.unit === '秒' || n.unit === 's', 0.06));
-        slots.axis = SEL('x');
+        slots.start = TIME(0);
         why.push(`重复 ×${slots.count.v}`);
         break;
-
-      case 'drawShape':
-        slots.layer = this.layerOf(clause);
-        slots.shape = SEL(pickShape(clause));
-        slots.fill = COL(pickColor(clause) || '#4a8cff');
-        slots.start = TIME(0);
-        why.push('绘制图元');
+      }
         break;
 
+      case 'drawShape': {
+        // 积木定义是 [图层, 填充, 宽, 高, 圆角]，没有形状类型槽 ——
+        // 宽高按子句里出现的像素数依次取，取不到就用定义默认值。
+        const pxs = nums.filter(n => n.unit === 'px' || n.unit === '像素');
+        slots.layer = this.layerOf(clause);
+        slots.fill = COL(pickColor(clause) || '#4a8cff');
+        slots.w = NUM(pxs[0] ? pxs[0].v : 400);
+        slots.h = NUM(pxs[1] ? pxs[1].v : 120);
+        why.push('绘制图元');
+        break;
+      }
       case 'wait':
         slots.dur = TIME(numOf(n => n.unit === '秒' || n.unit === 's' || n.unit === '', 1));
         why.push(`等待 ${slots.dur.v}s`);
@@ -288,6 +314,80 @@ export class NLParser {
         const n = nums.find(x => x.unit === '次') || nums[0];
         slots.count = NUM(n ? Math.max(1, Math.round(n.v)) : 3);
         why.push(`重复 ${slots.count.v} 次`);
+        break;
+      }
+
+      case 'broadcast': {
+        const m = clause.match(/[「"']([^「」"']{1,12})[」"']/);
+        slots.message = SEL(m ? m[1] : '开始');
+        why.push(`广播「${slots.message.v}」`);
+        break;
+      }
+
+      case 'forever':
+        why.push('一直重复（每轮让出一帧）');
+        break;
+
+      case 'setVar': {
+        const name = varNameOf(clause);
+        slots.name = STR(name);
+        slots.value = NUM(numOf(n => !/次|％|%/.test(n.unit), 1));
+        why.push(`把变量 ${name} 设为 ${slots.value.v}`);
+        break;
+      }
+
+      case 'changeVar': {
+        const name = varNameOf(clause);
+        slots.name = STR(name);
+        slots.delta = NUM(numOf(n => !/次|％|%/.test(n.unit), 1));
+        why.push(`让变量 ${name} 增加 ${slots.delta.v}`);
+        break;
+      }
+
+      case 'listCreate': {
+        const m = clause.match(/[「"']([^「」"']{1,12})[」"']/);
+        slots.name = STR(m ? m[1] : '列表1');
+        why.push(`创建列表「${slots.name.v}」`);
+        break;
+      }
+
+      case 'listAdd': {
+        const m = clause.match(/[「"']([^「」"']{1,12})[」"']/);
+        slots.name = STR(m ? m[1] : '列表1');
+        const d = extractData(clause);
+        slots.value = STR(d || String(numOf(() => true, 1)));
+        why.push(`往列表「${slots.name.v}」加入 ${slots.value.v}`);
+        break;
+      }
+
+      case 'createObject': {
+        const m = clause.match(/[「"']([^「」"']{1,12})[」"']/);
+        slots.name = STR(m ? m[1] : '新对象');
+        slots.type = SEL(pickObjectType(clause));
+        const coords = [...clause.matchAll(/(-?\d+(?:\.\d+)?)/g)].map(x => parseFloat(x[1]));
+        slots.x = NUM(coords.length >= 2 ? coords[0] : 960);
+        slots.y = NUM(coords.length >= 2 ? coords[1] : 540);
+        why.push(`创建对象「${slots.name.v}」（${slots.type.v}）`);
+        break;
+      }
+
+      case 'hideObject': case 'showObject':
+        slots.layer = this.layerOf(clause);
+        why.push(op === 'hideObject' ? '隐藏对象' : '显示对象');
+        break;
+
+      case 'setPosition': case 'glideTo': {
+        const m = clause.match(/(-?\d+(?:\.\d+)?)\s*[,，]\s*(-?\d+(?:\.\d+)?)/);
+        slots.layer = this.layerOf(clause);
+        slots.x = NUM(m ? parseFloat(m[1]) : 960);
+        slots.y = NUM(m ? parseFloat(m[2]) : 540);
+        if (op === 'glideTo') {
+          slots.dur = TIME(numOf(n => n.unit === '秒' || n.unit === 's', 1));
+          slots.anim = SEL(pickMoveAnim(clause));
+        }
+        why.push(op === 'glideTo'
+          ? `滑行到 (${slots.x.v}, ${slots.y.v})，用时 ${slots.dur.v}s`
+          : `移到 (${slots.x.v}, ${slots.y.v})`);
         break;
       }
 
@@ -382,12 +482,28 @@ function pickColor(clause) {
   const named = { 红: '#ff4a4a', 绿: '#38c98b', 蓝: '#4a8cff', 黄: '#ffd166', 紫: '#7c5cff', 粉: '#ff6bcb', 橙: '#ff9f45', 青: '#38ffd1', 白: '#ffffff', 黑: '#0d1017' };
   return named[m[0]] || m[0];
 }
-function pickShape(clause) {
-  if (/圆/.test(clause)) return 'circle';
-  if (/三角/.test(clause)) return 'triangle';
-  if (/星/.test(clause)) return 'star';
-  if (/线/.test(clause)) return 'line';
+/** 「创建对象」的类型槽只有这几种，按子句里的形状词挑一个 */
+function pickObjectType(clause) {
+  if (/圆形|圆圈/.test(clause)) return 'circle';
+  if (/文字|文本/.test(clause)) return 'text';
+  if (/图片/.test(clause)) return 'image';
+  if (/造型|角色|精灵/.test(clause)) return 'sprite';
   return 'rect';
+}
+/** 位移类积木的缓动：滑行默认平滑，明确要「弹」才用回弹 */
+function pickMoveAnim(clause) {
+  if (/匀速|线性/.test(clause)) return 'linear';
+  if (/回弹|过冲|弹一下/.test(clause)) return 'backOut';
+  return 'inOutQuad';
+}
+/** 变量名：优先引号里的名字，其次「变量 xxx」，最后退回常见的「得分」 */
+function varNameOf(clause) {
+  const quoted = clause.match(/[「"']([^「」"'\s]{1,20})[」"']/);
+  if (quoted) return quoted[1];
+  const named = clause.match(/变量\s*([A-Za-z_$\u4e00-\u9fa5][\w$\u4e00-\u9fa5]*)/);
+  if (named) return named[1];
+  if (/得分|分数/.test(clause)) return '得分';
+  return 'score';
 }
 function extractData(clause) {
   const m = clause.match(/(\d+(?:\s*[,，、]\s*\d+)+)/);
@@ -410,7 +526,7 @@ function extractData(clause) {
  * 数组里的 null = 这个槽没有对应的解析结果，交给 actionsToBlocks 用
  * blocks.js 的默认值填。不要为了「填满」把别的参数硬塞进去。
  */
-const SLOT_ORDER = {
+export const SLOT_ORDER = {
   charPopIn: ['layer', 'start', 'gap', 'anim'],
   // stagger 的 def.slots 是 [图层, 单元间隔, 起始延迟]，没有「单位」槽；
   // parser 产出的 unit 在这里被有意丢弃（evaluator 里 ensureUnits 固定按 char 走）。
@@ -438,25 +554,118 @@ const SLOT_ORDER = {
   // def.slots = [图层, 数据, 单根时长, 间隔, 起始, 颜色]
   growBar: ['layer', 'data', 'perBar', null, 'start', null],
   drawLine: ['layer', 'data', 'perPoint', 'start'],
-  // ⚠ 未对齐，已上报：evaluator 从 E(0) 读图层、E(5) 读速度，而 blocks.js 的
-  // particles 只有 5 个槽、第 0 槽是「粒子数」——两边差一个图层槽，
-  // 光靠这张表补不回来（改 blocks.js 或 evaluator 才行，不在这批范围内）。
-  particles: ['layer', 'count', 'speed', 'life'],
-  // ⚠ 同上：evaluator 的 repeater 按 [图层, 份数, 间距, 错峰间隔, 起始, 起始高度]
-  // 读 6 个位置，blocks.js 只有 5 个槽且第 0 槽是「份数」。
-  repeater: ['layer', 'count', 'gap', 'axis'],
-  // def.slots = [图层, 填充, 宽, 高, 圆角]；shape/start 没有对应槽。
-  // 注：evaluator 里没有 drawShape 的 case，这个积木目前不会产生任何画面。
-  drawShape: ['layer', 'fill'],
+  // particles / repeater 的积木定义里没有图层槽（运行时按「首槽是不是图层名」
+  // 自动判断），所以位置映射从第 0 槽开始，不能再塞 layer。
+  particles: ['count', 'start', 'life', 'color', 'speed', 'lifeScale', 'spread', 'gravity', 'drag', 'sizeScale'],
+  repeater: ['count', 'spacing', 'gap', 'start', 'h0'],
+  // def.slots = [图层, 填充, 宽, 高, 圆角]
+  drawShape: ['layer', 'fill', 'w', 'h', 'radius'],
   wait: ['dur'],
   setAt: ['at'],
   loop: ['count'],
   parallel: [],
   atMarker: ['marker'],
-  // setVar 是新加的「写变量」op，def.slots = [变量名(str), 值(num)]。
-  // parser 目前没有产出这个 op 的句式，但映射先对齐着：将来加了句式，
-  // 参数会按位置落进对的槽，不会重演 #19（错开一位、参数落进类型不符的槽）。
-  setVar: ['name', 'value'],
+  // 以下 op 目前没有本地句式产出，映射先按槽位语义补齐：
+  // 契约测试要求每个语句积木都有位置映射，避免将来加句式时错位。
+  after: ['delay'],
+  waitUntilMarker: ['marker'],
+  showText: ['layer', 'text'],
+  setText: ['layer', 'text'],
+  splitBy: ['layer', 'unit'],
+  setFill: ['layer', 'color', 'duration', 'start'],
+  if: ['condition'],
+  // setVar 的槽 = [变量名(str), 值(num), 作用域(sel)]，与 changeVar 对称。
+  setVar: ['name', 'value', 'scope'],
+
+  /* ---------------- 事件帽子（无本地句式，占位映射） ---------------- */
+  whenStart: [],
+  whenKey: ['key'],
+  whenReceive: ['message'],
+  whenClicked: [],
+  whenAt: ['at', 'mode'],
+  whenClone: [],
+
+  /* ---------------- 控制 ---------------- */
+  waitUntilTime: ['at'],
+  waitUntil: ['condition'],
+  forever: [],
+  repeatUntil: ['condition'],
+  stop: ['mode'],
+  broadcast: ['message'],
+  broadcastWait: ['message'],
+
+  /* ---------------- 时间 / 关键帧 ---------------- */
+  setDuration: ['duration'],
+  setKeyframe: ['layer', 'prop', 'at', 'value'],
+  setKeyframeColor: ['layer', 'color', 'at'],
+  tweenProp: ['layer', 'prop', 'from', 'to', 'dur', 'anim'],
+  tweenColor: ['layer', 'from', 'to', 'dur', 'anim'],
+
+  /* ---------------- 运动 ---------------- */
+  setPosition: ['layer', 'x', 'y'],
+  changeX: ['layer', 'dx'],
+  changeY: ['layer', 'dy'],
+  setSize: ['layer', 'size'],
+  setDirection: ['layer', 'direction'],
+  rotateBy: ['layer', 'angle'],
+  setOpacity: ['layer', 'opacity'],
+  glideTo: ['layer', 'x', 'y', 'dur', 'anim'],
+  moveSteps: ['layer', 'steps'],
+  pointTowards: ['layer', 'target'],
+  bounceOffEdge: ['layer'],
+  moveAlongPath: ['layer', 'path', 'dur'],
+  formulaMove: ['layer', 'mode', 'ax', 'ay', 'period', 'start'],
+  physicsMove: ['layer', 'vx', 'vy', 'gravity', 'bounce', 'friction'],
+
+  /* ---------------- 对象 / 舞台 ---------------- */
+  switchBackdrop: ['color'],
+  setStageSize: ['width', 'height'],
+  setStageFps: ['fps'],
+  createObject: ['name', 'type', 'x', 'y'],
+  deleteObject: ['layer'],
+  showObject: ['layer'],
+  hideObject: ['layer'],
+  cloneObject: ['layer'],
+  bringToFront: ['layer'],
+  sendToBack: ['layer'],
+  goForward: ['layer'],
+  goBackward: ['layer'],
+  setParent: ['layer', 'parent'],
+
+  /* ---------------- 外观 ---------------- */
+  setTextStyle: ['layer', 'size', 'color', 'weight'],
+  setColorEffect: ['layer', 'effect', 'value'],
+  changeColorEffect: ['layer', 'effect', 'delta'],
+  setBrightness: ['layer', 'value'],
+  setSaturation: ['layer', 'value'],
+  setContrast: ['layer', 'value'],
+  setBlur: ['layer', 'radius'],
+  addGlow: ['layer', 'radius', 'color'],
+  addShadow: ['layer', 'radius', 'color'],
+  clearEffects: ['layer'],
+  setBlendMode: ['layer', 'mode'],
+  setClipRect: ['layer', 'x', 'y', 'w', 'h'],
+  maskWith: ['layer', 'mask'],
+
+  /* ---------------- 声音 ---------------- */
+  playSound: ['sound', 'volume'],
+  playSoundWait: ['sound', 'volume'],
+  stopAllSounds: [],
+  setVolume: ['volume'],
+  triggerSoundAt: ['sound', 'at', 'volume'],
+  switchCostume: ['layer', 'costume'],
+  playSequence: ['layer', 'list', 'fps'],
+
+  /* ---------------- 列表 ---------------- */
+  listCreate: ['name'],
+  listAdd: ['name', 'value'],
+  listDelete: ['name', 'index'],
+  listInsert: ['name', 'index', 'value'],
+  listSet: ['name', 'index', 'value'],
+  listClear: ['name'],
+
+  /* ---------------- 变量 ---------------- */
+  changeVar: ['name', 'delta', 'scope'],
 };
 
 /**

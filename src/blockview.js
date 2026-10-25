@@ -5,8 +5,9 @@
    两者读同一份 IR（ir.js），符合规划里「积木与节点共用一份中间表示」。
    ============================================================ */
 
-import { defOf, EASINGS, UNIT_LABELS, DIR_LABELS, LEAF_SLOTS } from './blocks.js';
+import { defOf, EASINGS, UNIT_LABELS, DIR_LABELS, LEAF_SLOTS, LAYER_HEAD_COLORS, HAT_OPS, MENU_ITEMS } from './blocks.js';
 import { NUM, STR, BOOL, COL, TIME, SEL, defaultForType, uid, toText } from './ir.js';
+import { applyContrastVars } from './contrast.js';
 
 /* 会话态（由 main.js 注入回调） */
 export const S = {
@@ -58,13 +59,13 @@ export function renderBlocks() {
   ROOT.scrollTop = scrollTop;
 }
 
-const LAYER_HEAD_COLORS = { text: '#9966ff', rect: '#0fbd8c', circle: '#4c97ff', image: '#ff8c1a' };
-
 function layerHeader(layer) {
   const d = document.createElement('div');
   // 注意：不要用 .block 类，否则会被当成可选中的积木
   d.className = 'block-head';
-  d.style.setProperty('--bc', LAYER_HEAD_COLORS[layer.type] || '#4c97ff');
+  const headColor = LAYER_HEAD_COLORS[layer.type] || '#4c97ff';
+  d.style.setProperty('--bc', headColor);
+  applyContrastVars(d, headColor);
   const h = el('div', 'bh');
   h.appendChild(el('span', 'dot'));
   h.appendChild(el('span', 'lbl', `图层逻辑 · ${layer.name}`));
@@ -81,10 +82,12 @@ export function blockEl(b, listKey, layer, depth = 0) {
   const def = defOf(b.op);
   const node = document.createElement('div');
   node.className = 'block' + (b.k === 'N' ? ' leaf' : ' cblock');
+  if (b.k !== 'N' && (HAT_OPS.has(b.op) || (def && def.hat))) node.classList.add('hat');
   if (def) {
     node.style.setProperty('--bc', def.color);
     node.dataset.cat = def.cat || '';
   } else node.style.setProperty('--bc', '#6b7280');
+  applyContrastVars(node, def ? def.color : '#6b7280');
   node.dataset.id = b.id;
   node.dataset.op = b.op;
   node.dataset.list = listKey;
@@ -142,9 +145,12 @@ function appendLeafArgs(h, b) {
   }
   specs.forEach((sd, i) => {
     const key = ['a', 'b', 'c', 'p', 'p2'][i];
+    const extra = sd[3] || {};
     const s = {
-      type: sd[0], label: sd[1], menu: sd[3] || null, placeholder: sd[4] || '',
-      value: vals[i] !== undefined && vals[i] !== null ? vals[i] : defaultForType(sd[0]),
+      type: sd[0], label: sd[1],
+      menu: typeof extra === 'string' ? extra : (extra.menu || null),
+      placeholder: sd[4] || '',
+      value: vals[i] !== undefined && vals[i] !== null ? vals[i] : defaultForType(sd[0], sd[2]),
     };
     h.appendChild(pinEl(s, b, `${key}`, false));
   });
@@ -165,6 +171,7 @@ function pinEl(slot, owner, path, isSlot = true) {
     chip.dataset.expr = owner.id;
     chip.dataset.path = path;
     chip.title = '点击编辑表达式';
+    applyContrastVars(chip, '#cf63cf');
     holder.appendChild(chip);
     return holder;
   }
@@ -172,6 +179,7 @@ function pinEl(slot, owner, path, isSlot = true) {
     const chip = el('span', 'exprmini', `♪${audioLabel(v.metric)}`);
     chip.dataset.expr = owner.id;
     chip.dataset.path = path;
+    applyContrastVars(chip, '#cf63cf');
     holder.appendChild(chip);
     return holder;
   }
@@ -227,9 +235,43 @@ function menuOptions(slot) {
   if (m === 'layersShape') return S.ir.layers.filter(l => l.type !== 'text').map(l => [l.name, l.name]);
   if (m === 'targets') {
     const opts = [['', '（当前图层）']];
-    for (const l of S.ir.layers) opts.push([l.name, l.name]);
+    const names = new Set();
+    for (const l of S.ir.layers) names.add(l.name);
+    // 运行时创建的对象没有 IR 图层，扫描 createObject 的名称才能选到它
+    const walk = (list) => {
+      for (const b of list || []) {
+        if (!b) continue;
+        if (b.op === 'createObject') {
+          const v = b.slots && b.slots[0] && b.slots[0].value;
+          if (v && v.v !== undefined && v.v !== '') names.add(String(v.v));
+        }
+        for (const s of b.slots || []) if (Array.isArray(s.value)) walk(s.value);
+      }
+    };
+    for (const l of S.ir.layers) walk(l.blocks);
+    for (const n of names) opts.push([n, n]);
     return opts;
   }
+  if (m === 'layersAll') return S.ir.layers.map(l => [l.name, l.name]);
+  if (m === 'layersAllWithNone') {
+    return [['', '（不指定）'], ...S.ir.layers.map(l => [l.name, l.name])];
+  }
+  if (m === 'messages') {
+    const seen = new Set(['开始']);
+    const walk = (list) => {
+      for (const b of list || []) {
+        if (!b) continue;
+        if (b.op === 'whenReceive' || b.op === 'broadcast' || b.op === 'broadcastWait') {
+          const v = b.slots && b.slots[0] && b.slots[0].value;
+          if (v && v.v !== undefined && v.v !== '') seen.add(String(v.v));
+        }
+        for (const s of b.slots || []) if (Array.isArray(s.value)) walk(s.value);
+      }
+    };
+    for (const l of S.ir.layers) walk(l.blocks);
+    return [...seen].map(x => [x, x]);
+  }
+  if (MENU_ITEMS[m]) return MENU_ITEMS[m];
   if (m === 'easings') return EASINGS.map(([k, t]) => [k, t]);
   if (Array.isArray(m)) {
     if (m.length && typeof m[0] === 'string' && (UNIT_LABELS[m[0]] || DIR_LABELS[m[0]] || EASINGS.find(e => e[0] === m[0]))) {
@@ -429,6 +471,7 @@ function startDrag(payload, ev) {
   ghost.appendChild(g);
   ghost.style.cssText = 'position:fixed;left:0;top:0;pointer-events:none;z-index:999;opacity:.85';
   ghost.style.setProperty('--bc', def ? def.color : '#4a8cff');
+  applyContrastVars(ghost, def ? def.color : '#4a8cff');
   document.body.appendChild(ghost);
 
   const sx = ev.clientX, sy = ev.clientY;
@@ -543,12 +586,22 @@ function applyDrop(payload, dz, dropY) {
       const par = findBlockParent(S.ir, payload.id);
       if (!par) return;
       moving = par.list[par.index];
+      // 帽子积木只能放在图层最外层
+      if (HAT_OPS.has(moving.op) && listKey !== 'root') {
+        S.onReject && S.onReject('帽子积木只能放在最外层');
+        return;
+      }
       // 禁止把积木拖进自己的子树（会造成不可达代码）
       const sub = collectIds(moving);
       if (listIsInside(moving, listKey)) return;
       if (containsId(listKey, sub)) return;
       par.list.splice(par.index, 1);
     } else {
+      const nd = defOf(payload.op);
+      if (nd && nd.hat && listKey !== 'root') {
+        S.onReject && S.onReject('帽子积木只能放在最外层');
+        return;
+      }
       moving = createBlock(payload.op);
     }
     const list = resolveList(listKey);
@@ -605,10 +658,10 @@ export function createBlock(op) {
   const def = defOf(op);
   if (!def) return { id: uid('B'), k: 'C', op, slots: [] };
   if (def.isLeaf) {
-    const slots = leafSpec(op);
+    const specs = leafSpec(op);
     const b = { id: uid('B'), k: 'N', op };
     const keys = ['a', 'b', 'c', 'p', 'p2'];
-    slots.forEach((sd, i) => { b[keys[i]] = defaultForType(sd[0]); });
+    specs.forEach((sd, i) => { b[keys[i]] = defaultForType(sd[0], sd[2]); });
     return b;
   }
   const b = { id: uid('B'), k: 'C', op, slots: [] };
@@ -616,7 +669,7 @@ export function createBlock(op) {
     const isSub = sd.default !== undefined && Array.isArray(sd.default);
     b.slots.push({
       type: sd.type, label: sd.label, placeholder: sd.placeholder, menu: sd.menu || null,
-      value: isSub ? [] : defaultForType(sd.type),
+      value: isSub ? [] : defaultForType(sd.type, sd.default),
     });
   }
   return b;

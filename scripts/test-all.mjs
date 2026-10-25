@@ -13,6 +13,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const SUITES = [
   { name: '纯逻辑自测', file: 'run-tests.mjs', desc: '缓动/颜色/噪声/IR 往返/求值/纯函数性/渲染管线' },
+  { name: '运行时解释器', file: 'test-runtime.mjs', desc: '固定步长/seek 重放/状态一致/预算/预览导出同源' },
+  { name: '积木契约', file: 'test-contract.mjs', desc: '每个积木都有分类/执行实现/位置映射/默认值' },
+  { name: '旧模板绘制回归', file: 'test-goldens.mjs', desc: '全部官方模板逐帧绘制指令与基线一致' },
+  { name: '积木对比度', file: 'test-contrast.mjs', desc: '分类色/图层头/表达式芯片的文字与图标 WCAG 对比度守门' },
   { name: '音频内核', file: 'test-audio.mjs', desc: 'WAV/FFT/响度/节拍/波形编辑/去静默/闪避' },
   { name: '统一音源与视频导出', file: 'test-video.mjs', desc: '合成/真实音频统一接口/踩点/格式能力探测/WAV 封装' },
   { name: '自定义积木', file: 'test-custom.mjs', desc: '函数定义/宏展开/形参替换/递归保护/跨项目库' },

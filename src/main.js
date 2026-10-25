@@ -13,6 +13,8 @@ import * as BV from './blockview.js';
 import * as EX from './exporter.js';
 import { TEMPLATES, loadTemplate, defaultAudio } from './templates.js';
 import { TimelineDebugger } from './debugger.js';
+import { applyContrastVars, bestTextOn, mixHex } from './contrast.js';
+import { createSoundPlayer } from './sound.js';
 
 /* ---------- P0/P1/P2 新增模块 ---------- */
 import { AudioSource as UnifiedAudio } from './audiosource.js';
@@ -59,12 +61,15 @@ const App = {
   zoomNum: 1,
   showSafeArea: true,
   dirty: false,
+  rev: 0,                   // IR 变更计数：运行时按它判断是否需要 reset
+  runtime: null,            // 最近一帧使用的 Runtime（调试面板与输入事件用）
+  sound: null,              // 预览声音播放器（导出永不使用）
   title: '',
   exportCancel: false,
   prefs: { fps: 24, width: 1920, height: 1080, duration: 6, bpm: 120, loudness: -14 },
 
-  /* 界面偏好：主题与时间线位置，持久化到 localStorage */
-  ui: { theme: 'dark', tlMode: 'left', tlWidth: 320, lastTlMode: 'left' },
+  /* 界面偏好：主题、时间线位置、预览播放速度，持久化到 localStorage */
+  ui: { theme: 'dark', tlMode: 'left', tlWidth: 320, lastTlMode: 'left', speed: 1 },
 
   /* ---------- 新增子系统 ---------- */
   audioTracks: [],          // AudioTrack[]（真实音频）
@@ -100,6 +105,8 @@ const undoStack = [];
 const redoStack = [];
 const MAX_UNDO = 60;
 
+App.sound = createSoundPlayer();
+
 const dbg = new TimelineDebugger();
 
 /* ============================================================
@@ -132,6 +139,7 @@ function boot() {
   BV.S.openExpr = openExprEditor;
   BV.S.onBlockMenu = openBlockMenu;
   BV.S.onLayerMenu = openLayerMenu;
+  BV.S.onReject = (msg) => toast(msg, 'warn');
 
   BV.initBlockView($('blockCanvas'));
   BV.bindPinEditing($('blockCanvas'));
@@ -142,6 +150,8 @@ function boot() {
   loadUiPrefs();
   applyTheme(App.ui.theme, { persist: false });
   applyTimelineMode(App.ui.tlMode, { persist: false, relayout: false });
+  const speedSel = $('speedSelect');
+  if (speedSel) speedSel.value = String(App.ui.speed);
 
   syncProjectToUI();
   buildPalette();
@@ -1385,6 +1395,7 @@ function pushUndo() {
 }
 function restore(json) {
   App.ir = JSON.parse(json);
+  App.rev++;
   App.audio.setDuration(App.ir.project.duration);
   BV.S.ir = App.ir;
   if (!App.ir.layers.find(l => l.id === App.layerId)) App.layerId = App.ir.layers[0] && App.ir.layers[0].id;
@@ -1432,7 +1443,10 @@ function drawFrame() {
   // 统一音源：有真实音频就读真实音频，否则回落到合成包络
   const audio = App.audioSource || App.audio;
   const { state, ctx } = evaluateFrame(ir, App.time, audio, {
+    rev: App.rev,
     customLibrary: App.customLibrary,
+    // 只在播放中出声；暂停、拖动播放头、导出都静音
+    sound: App.playing ? App.sound : null,
     onCustomBlockError: (layer, e) => {
       if (!drawFrame._cbErr || drawFrame._cbErr !== e.message) {
         drawFrame._cbErr = e.message;
@@ -1440,6 +1454,7 @@ function drawFrame() {
       }
     },
   });
+  App.runtime = ctx || null;
   if (ctx && ctx.budgetExceeded) {
     if (!drawFrame._budgetWarned) {
       drawFrame._budgetWarned = true;
@@ -1448,8 +1463,6 @@ function drawFrame() {
   } else {
     drawFrame._budgetWarned = false;
   }
-  state.ir = ir;
-  state.order = ir.layers.map(l => l.id);
   const dpr = window.devicePixelRatio || 1;
   const px = Math.max(1, Math.round(ir.project.width * App.zoomNum * dpr));
   const py = Math.max(1, Math.round(ir.project.height * App.zoomNum * dpr));
@@ -1471,10 +1484,14 @@ function tick(ts) {
   if (!App.playing) return;
   const dt = App.lastTs ? (ts - App.lastTs) / 1000 : 0;
   App.lastTs = ts;
-  App.time += dt;
-  if (App.time >= App.ir.project.duration) {
-    if (App.loop) App.time = 0;
-    else { App.time = App.ir.project.duration; setPlaying(false); }
+  App.time += dt * (App.ui.speed || 1);
+  // 舞台时长可被 setDuration 改写，循环边界跟运行时保持一致
+  const dur = (App.runtime && App.runtime.stage && App.runtime.stage.duration) || App.ir.project.duration;
+  if (App.time >= dur) {
+    if (App.loop) {
+      if (App.sound) App.sound.stopAll();
+      App.time = 0;
+    } else { App.time = dur; setPlaying(false); }
   }
   drawFrame();
   updatePlayhead();
@@ -1487,7 +1504,10 @@ function setPlaying(on) {
   b.textContent = on ? '⏸ 暂停' : '▶ 播放';
   b.classList.toggle('primary', !on);
   if (on) { App.rafId = requestAnimationFrame(tick); }
-  else cancelAnimationFrame(App.rafId);
+  else {
+    cancelAnimationFrame(App.rafId);
+    if (App.sound) App.sound.stopAll();
+  }
 }
 
 /* ============================================================
@@ -1525,6 +1545,8 @@ function loadUiPrefs() {
     if (['left', 'bottom', 'float', 'hidden'].includes(saved.lastTlMode)) App.ui.lastTlMode = saved.lastTlMode;
     const w = Number(saved.tlWidth);
     if (Number.isFinite(w)) App.ui.tlWidth = clamp(w, 240, 460);
+    const sp = Number(saved.speed);
+    if (Number.isFinite(sp) && sp >= 0.25 && sp <= 4) App.ui.speed = sp;
   } catch { /* 隐私模式 / 禁用存储时退回默认值 */ }
 }
 
@@ -2701,8 +2723,9 @@ function syncProjectToUI() {
    Scratch 式积木库（左侧类别色轨 + 弹出面板）
    ============================================================ */
 const CAT_ICONS = {
-  time: '⏱', text: 'T', shape: '◆', fx: '✦', math: '±',
-  color: '◐', logic: '⚙', arr: '▦', audio: '♪', marker: '⚑',
+  event: '⚡', control: '⟳', time: '⏱', marker: '⚑', text: 'T', fx: '✦',
+  shape: '◆', motion: '➤', object: '▣', looks: '◑', sound: '♪',
+  math: '±', color: '◐', logic: '⚙', arr: '▦', list: '☰', audio: '♬',
 };
 
 function buildPalette() {
@@ -2716,6 +2739,9 @@ function buildPalette() {
     b.className = 'cat-dot';
     b.dataset.cat = cat.key;
     b.style.setProperty('--c', cat.color);
+    b.style.setProperty('--c-ink', bestTextOn(mixHex(cat.color, '#f2f6fb', 0.82)));
+    b.style.setProperty('--c-ink-dark', bestTextOn(mixHex(cat.color, '#0c0f14', 0.84)));
+    b.style.setProperty('--c-on', bestTextOn(cat.color));
     b.title = `${cat.label} · ${cat.desc || ''}`;
     b.textContent = CAT_ICONS[cat.key] || '◆';
     b.addEventListener('click', () => togglePaletteCategory(cat.key));
@@ -2780,6 +2806,7 @@ function renderPaletteFlyout() {
     const it = document.createElement('div');
     it.className = 'pl-item' + (def.isLeaf ? ' leaf' : '');
     it.style.setProperty('--bc', def.color);
+    applyContrastVars(it, def.color);
     it.dataset.op = def.op;
     it.textContent = def.label;
     it.title = `${def.desc || ''}\n拖入画布，或双击添加`;
@@ -2849,6 +2876,7 @@ function openExprEditor(ownerId, path) {
       const chip = document.createElement('span');
       chip.className = 'exprmini';
       chip.textContent = `${d ? d.label : staged.op}(${[staged.a, staged.b, staged.c].map(fmtVal).filter(Boolean).join(', ')})`;
+      applyContrastVars(chip, '#cf63cf');
       valBox.appendChild(chip);
     } else {
       const inp = document.createElement('input');
@@ -2867,6 +2895,7 @@ function openExprEditor(ownerId, path) {
     const it = document.createElement('div');
     it.className = 'pl-item';
     it.style.setProperty('--bc', def.color);
+    applyContrastVars(it, def.color);
     it.textContent = def.label;
     it.title = def.desc || '';
     it.addEventListener('click', () => {
@@ -3007,6 +3036,8 @@ function reuid(o) {
    ============================================================ */
 function newProject() {
   if (!confirm('新建工程会清空当前内容，继续？')) return;
+  // 整份工程要被换掉，先停表：否则旧脚本排下来的音效会盖到新工程上
+  setPlaying(false);
   pushUndo();
   App.ir = defaultProject('新建工程');
   App.audio = defaultAudio(App.ir);
@@ -3052,6 +3083,7 @@ $('fileInput').addEventListener('change', async (e) => {
       if (r.notes.length) toast(r.notes.join('；'), 'err', 4000);
     }
     pushUndo();
+    setPlaying(false);
     App.ir = ir;
     App.audio = defaultAudio(ir);
     resetAudioState();
@@ -3667,6 +3699,7 @@ async function batchZip() {
 
 function markDirty() {
   App.dirty = true;
+  App.rev++;
   $('statusText').textContent = '● 未保存';
   clearTimeout(dirtyTimer);
   // 定时器只负责把状态栏文字恢复成「就绪」，
@@ -3704,16 +3737,41 @@ function updateDebugPanels() {
   // 变量
   const vb = $('dbgVars');
   vb.innerHTML = '';
-  if (!dbg.vars.size) {
+  const rt = App.runtime;
+  const rtVars = rt ? [...rt.vars].filter(([k]) => !String(k).startsWith('$')) : [];
+  const rtLists = rt ? [...rt.lists] : [];
+  const liveThreads = rt ? rt.threads.filter(t => !t.done).length : 0;
+  if (!dbg.vars.size && !rtVars.length && !rtLists.length) {
     const d = document.createElement('div');
     d.className = 'dbg-line';
     d.textContent = '（无变量写入）$time / $frame / $progress 由引擎注入';
     vb.appendChild(d);
   }
+  const shown = new Set();
   for (const [k, v] of dbg.vars) {
+    shown.add(k);
     const d = document.createElement('div');
     d.className = 'dbg-line';
     d.innerHTML = `<span class="s">${escapeHtml(k)}</span> = <span class="v">${escapeHtml(fmtVal(v))}</span>`;
+    vb.appendChild(d);
+  }
+  for (const [k, v] of rtVars) {
+    if (shown.has(k)) continue;
+    const d = document.createElement('div');
+    d.className = 'dbg-line';
+    d.innerHTML = `<span class="s">${escapeHtml(k)}</span> = <span class="v">${escapeHtml(fmtVal(v))}</span>`;
+    vb.appendChild(d);
+  }
+  for (const [k, arr] of rtLists) {
+    const d = document.createElement('div');
+    d.className = 'dbg-line';
+    d.innerHTML = `<span class="s">${escapeHtml(k)}</span> [<span class="n">${arr.length}</span>] <span class="v">${escapeHtml(arr.slice(0, 8).join(', '))}${arr.length > 8 ? ' …' : ''}</span>`;
+    vb.appendChild(d);
+  }
+  if (rt) {
+    const d = document.createElement('div');
+    d.className = 'dbg-line';
+    d.innerHTML = `线程 <span class="n">${liveThreads}</span> 活 / <span class="n">${rt.threads.length}</span> 总 · 对象 <span class="n">${rt.objects.size}</span> · 本帧 <span class="n">${rt.steps}</span> 步`;
     vb.appendChild(d);
   }
   // 探针
@@ -3892,6 +3950,12 @@ function bindGlobal() {
     App.audio.setDuration(App.ir.project.duration);
     buildRuler(); renderProjectSettings(); drawFrame(); markDirty();
   });
+  const speedSelEl = $('speedSelect');
+  if (speedSelEl) speedSelEl.addEventListener('change', (e) => {
+    const v = parseFloat(e.target.value);
+    App.ui.speed = Number.isFinite(v) && v >= 0.25 && v <= 4 ? v : 1;
+    saveUiPrefs();
+  });
 
   /* 时间线：标尺 / 轨道刷洗、播放头拖动、缩放、滚动同步、高度拖拽 */
   $('ruler').addEventListener('mousedown', scrubTimeline);
@@ -3913,10 +3977,27 @@ function bindGlobal() {
   /* 导出取消 */
   document.querySelector('[data-act="export.cancel"]').addEventListener('click', () => { App.exportCancel = true; });
 
+  /* 预览播放中的交互事件：只喂给运行时，不写进工程 */
+  canvas.addEventListener('click', (e) => {
+    if (!App.playing || !App.runtime || !App.ir) return;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    App.runtime.pushInput({
+      kind: 'click',
+      x: (e.clientX - rect.left) / rect.width * App.ir.project.width,
+      y: (e.clientY - rect.top) / rect.height * App.ir.project.height,
+    });
+  });
+
   /* 快捷键 */
   document.addEventListener('keydown', (e) => {
     const tag = (e.target.tagName || '').toLowerCase();
     const editing = tag === 'input' || tag === 'textarea' || e.target.isContentEditable;
+    if (App.playing && !editing && App.runtime && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // 空格是播放/暂停，其余编辑器快捷键不当作按键事件
+      const reserved = ['Space', 'Comma', 'Period', 'Delete', 'Backspace', 'Escape', 'F9', 'F10'];
+      if (!reserved.includes(e.code)) App.runtime.pushInput({ kind: 'key', key: e.key });
+    }
     if (e.code === 'Space' && !editing) { e.preventDefault(); setPlaying(!App.playing); }
     else if (e.key === ',' && !editing) { App.time = Math.max(0, App.time - 1 / App.ir.project.fps); updatePlayhead(); drawFrame(); }
     else if (e.key === '.' && !editing) { App.time = Math.min(App.ir.project.duration, App.time + 1 / App.ir.project.fps); updatePlayhead(); drawFrame(); }
@@ -4153,6 +4234,7 @@ function loadTplDialog() {
     d.addEventListener('mouseleave', () => d.style.borderColor = 'var(--line)');
     d.addEventListener('click', () => {
       pushUndo();
+      setPlaying(false);
       App.ir = t.make();
       App.audio = defaultAudio(App.ir);
       App.layerId = App.ir.layers[1] ? App.ir.layers[1].id : App.ir.layers[0].id;
@@ -4190,6 +4272,7 @@ function importPastedText() {
   try {
     const r = fromText(txt, BLOCK_DEFS);
     pushUndo();
+    setPlaying(false);
     App.ir = r.ir;
     App.audio = defaultAudio(App.ir);
     App.layerId = App.ir.layers[0] && App.ir.layers[0].id;
@@ -4320,6 +4403,7 @@ window.BlockAnim = {
 
   loadIR(ir) {
     pushUndo();
+    setPlaying(false);
     App.ir = ir;
     App.audio = defaultAudio(ir);
     resetAudioState();

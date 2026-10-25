@@ -59,6 +59,7 @@ export const LAYER_TYPES = {
   rect:  { label: '矩形',   icon: '▭' },
   circle:{ label: '圆形',   icon: '●' },
   image: { label: '图片',   icon: '▤' },
+  sprite:{ label: '造型',   icon: '◫' },
 };
 
 export function newLayer(name, type = 'rect', props = {}) {
@@ -69,7 +70,7 @@ export function newLayer(name, type = 'rect', props = {}) {
     visible: true,
     locked: false,
     props: Object.assign({
-      x: 960, y: 540, opacity: 1, rotation: 0,
+      x: 960, y: 540, opacity: 1, rotation: 0, scaleX: 1, scaleY: 1,
     }, type === 'text' ? {
       text: '文字', fontSize: 96, fontWeight: 700, fill: '#ffffff',
       align: 'left', letterSpacing: 0, lineHeight: 1.25, shadow: 0,
@@ -130,6 +131,7 @@ export function validate(ir) {
      # 工程: 名称                        ← 注释
      MARK 0.200 开场                      ← 锚点
      VAR name <json>                     ← 变量
+     LIST name ["a","b"]                 ← 列表变量（JSON 数组）
      LAYER 标题文字 [text] (隐藏)         ← 图层（缩进 0）
        PROP text = "你好"                 ← 图层静态属性
        @ splitBy "标题文字" schar         ← 积木（缩进即嵌套层级）
@@ -291,7 +293,14 @@ export function toText(ir) {
   for (const m of ir.markers) L.push(`MARK ${m.time.toFixed(3)} ${m.label}`);
   // 变量的值按「与槽位值同一套编码」写（见 parseVarValue 的说明）。
   // 原实现写 JSON.stringify，与读取侧不对称，每存读一轮多套一层转义。
-  for (const v of ir.variables || []) L.push(`VAR ${v.name} ${fmtValue(v.value)}`);
+  for (const v of ir.variables || []) {
+    if (v.type === 'list' || Array.isArray(v.value)) {
+      // 列表用 JSON 数组，逗号/引号/换行都不会破坏一行一条的格式
+      L.push(`LIST ${v.name} ${JSON.stringify((v.value || []).map(x => String(x)))}`);
+    } else {
+      L.push(`VAR ${v.name} ${fmtValue(v.value)}`);
+    }
+  }
   for (const layer of ir.layers) {
     L.push('');
     L.push(`LAYER ${escapeStr(layer.name)} [${layer.type}]${layer.visible ? '' : ' (隐藏)'}`);
@@ -368,6 +377,20 @@ export function fromText(text, blockDefs) {
     if (s.startsWith('MARK ')) {
       const m = s.slice(5).trim().match(/^([\d.]+)\s*(.*)$/);
       if (m) ir.markers.push({ id: uid('M'), time: parseFloat(m[1]) || 0, label: m[2] || '标记', color: '#ffb020' });
+      continue;
+    }
+    if (s.startsWith('LIST ')) {
+      const m = s.slice(5).trim().match(/^(\S+)\s*(.*)$/);
+      if (m) {
+        let arr = [];
+        try {
+          const j = JSON.parse(m[2]);
+          if (Array.isArray(j)) arr = j.map(x => String(x));
+        } catch {
+          arr = m[2] ? m[2].split(',').map(x => x.trim()).filter(Boolean) : [];
+        }
+        ir.variables.push({ id: uid('V'), name: m[1], type: 'list', value: arr });
+      }
       continue;
     }
     if (s.startsWith('VAR ')) {
@@ -455,10 +478,13 @@ export function fromText(text, blockDefs) {
 }
 
 function makeFromOp(md, op, tokens) {
+  const keys = ['a', 'b', 'c', 'p', 'p2'];
   if (md.isLeaf) {
     const b = { id: uid('B'), k: 'N', op };
-    ['a', 'b', 'c', 'p', 'p2'].forEach((k, i) => {
+    const specs = md.slots || [];
+    keys.forEach((k, i) => {
       if (tokens[i] !== undefined) b[k] = tokens[i];
+      else if (specs[i]) b[k] = defaultForType(specs[i].type, specs[i].default);
     });
     return b;
   }
@@ -466,7 +492,13 @@ function makeFromOp(md, op, tokens) {
   let pi = 0;
   for (const sd of (md.slots || [])) {
     if (sd.isSub) slots.push({ type: 'blocks', label: sd.label, menu: sd.menu || null, value: [] });
-    else slots.push({ type: sd.type, label: sd.label, placeholder: sd.placeholder, menu: sd.menu || null, value: tokens[pi] !== undefined ? tokens[pi] : defaultForType(sd.type) });
+    else slots.push({
+      type: sd.type,
+      label: sd.label,
+      placeholder: sd.placeholder,
+      menu: sd.menu || null,
+      value: tokens[pi] !== undefined ? tokens[pi] : defaultForType(sd.type, sd.default),
+    });
     if (!sd.isSub) pi++;
   }
   return { id: uid('B'), k: 'C', op, slots };
@@ -504,14 +536,15 @@ export function tokenizePins(rest) {
   return out;
 }
 
-export function defaultForType(t) {
+export function defaultForType(t, value) {
+  const v = value !== undefined && value !== null ? value : undefined;
   switch (t) {
-    case 'num': return NUM(0);
-    case 'time': return TIME(0);
-    case 'bool': return BOOL(false);
-    case 'col': return COL('#ffffff');
-    case 'sel': return SEL('');
-    case 'str': return STR('');
+    case 'num': return NUM(v !== undefined ? v : 0);
+    case 'time': return TIME(v !== undefined ? v : 0);
+    case 'bool': return BOOL(v !== undefined ? v : false);
+    case 'col': return COL(v !== undefined ? v : '#ffffff');
+    case 'sel': return SEL(v !== undefined ? v : '');
+    case 'str': return STR(v !== undefined ? v : '');
     default: return STR('');
   }
 }

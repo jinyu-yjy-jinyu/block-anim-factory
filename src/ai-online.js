@@ -12,7 +12,7 @@
    ai.js 的 actionsToBlocks 编译，所以在线失败可以无缝回退本地规则。
    ============================================================ */
 
-import { defOf, EASINGS } from './blocks.js';
+import { BLOCK_DEFS, CATS, HAT_OPS, defOf, EASINGS, MENU_ITEMS } from './blocks.js';
 import { ACTION_SLOT_ORDER, splitForSubtitle, suggestEffect } from './ai.js';
 import { uid, NUM, STR, COL, TIME, SEL, BOOL } from './ir.js';
 
@@ -30,12 +30,14 @@ export const AI_PROVIDERS = {
   custom: { label: '自定义 OpenAI 兼容接口', online: true },
 };
 
-/** 在线模型可生成的积木：只开放能独立产生画面的语句积木 */
-const ONLINE_OPS = [
-  'charPopIn', 'stagger', 'typewriter', 'fadeIn', 'fadeOut', 'moveIn', 'scaleIn',
-  'maskWipe', 'pathSweep', 'numberRoll', 'highlightWord', 'audioBars', 'ringSpectrum',
-  'growBar', 'drawLine', 'wait',
-];
+/**
+ * 在线模型可生成的积木 = 能独立成句的语句积木（既不是帽子，也没有子栈槽）。
+ * 帽子（whenXxx）和 C 形积木（forever / loop / if / setAt …）要嵌套子栈，
+ * 扁平的 actions 列表表达不了，交给本地规则引擎和手动拼装。
+ */
+const ONLINE_OPS = BLOCK_DEFS
+  .filter(d => !d.isLeaf && !HAT_OPS.has(d.op) && !d.slots.some(s => s.type === 'blocks'))
+  .map(d => d.op);
 const ONLINE_OP_SET = new Set(ONLINE_OPS);
 
 /** 分镜建议允许的动效 */
@@ -180,25 +182,45 @@ const TYPE_HINT = {
   sel: '选项字符串', col: '颜色 #RRGGBB', bool: 'true/false',
 };
 
-function menuOptions(menu) {
-  if (Array.isArray(menu)) return menu;
-  if (menu === 'easings') return EASINGS.map(e => e[0]);
+/* 取值要看当前工程的菜单：图层 / 目标 / 标记按名字校验，消息（broadcast）允许新名字 */
+const LAYER_MENUS = ['layersText', 'layersShape', 'layersAll', 'layersAllWithNone', 'targets', 'markers'];
+
+/* 取值固定的菜单 → [值, 中文标签]；数组型内联菜单（['left','right']）按值自映射 */
+function menuPairs(menu) {
+  if (Array.isArray(menu)) return menu.map(x => (Array.isArray(x) ? x : [x, x]));
+  if (menu === 'easings') return EASINGS;
+  if (MENU_ITEMS[menu]) return MENU_ITEMS[menu];
   return null;
 }
 
 function formatSlot(slot) {
-  const opts = menuOptions(slot.menu);
+  const pairs = menuPairs(slot.menu);
+  const opts = pairs && pairs.map(p => (p[1] && p[1] !== p[0] ? `${p[0]}(${p[1]})` : p[0])).join('/');
   let hint = TYPE_HINT[slot.type] || slot.type;
-  if (opts) hint = `可选 ${opts.join('/')}`;
-  else if (['layersText', 'layersShape', 'targets', 'markers'].includes(slot.menu)) hint = '图层名，只能从上下文图层里选';
+  if (opts) hint = `可选 ${opts}`;
+  else if (slot.menu === 'markers') hint = '标记名，只能从上下文给出的标记里选';
+  else if (slot.menu === 'messages') hint = '消息名，自由文本';
+  else if (LAYER_MENUS.includes(slot.menu)) hint = '图层名，只能从上下文图层里选';
   return `${slot.key}（${slot.label}，${hint}）`;
 }
 
 export function formatActionCatalog() {
-  return actionCatalog().map(a => {
-    const slots = a.slots.length ? `｜${a.slots.map(formatSlot).join('；')}` : '';
-    return `- ${a.op}「${a.label}」：${a.desc}${slots}`;
-  }).join('\n');
+  // 按分类分组：89 条积木平铺时小模型很难扫到合适的那条，分类标题相当于先做一次检索
+  const groups = new Map();
+  for (const a of actionCatalog()) {
+    const cat = (defOf(a.op) || {}).cat || 'other';
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(a);
+  }
+  const lines = [];
+  for (const [cat, list] of groups) {
+    lines.push(`【${CATS[cat] ? CATS[cat].label : cat}】`);
+    for (const a of list) {
+      const slots = a.slots.length ? `｜${a.slots.map(formatSlot).join('；')}` : '';
+      lines.push(`- ${a.op}「${a.label}」：${a.desc}${slots}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 export function buildActionMessages({ text, layers = [], markers = [], duration = 6, fps = 24 } = {}) {
@@ -212,8 +234,11 @@ export function buildActionMessages({ text, layers = [], markers = [], duration 
     '2. op 只能从下面列表里选；slots 的键只能用该 op 列出的参数，不要自造参数。',
     '3. 参数直接写原始值（数字 / 字符串 / 布尔），不要写表达式、函数或代码；时间单位是秒。',
     '4. 用户没提到的参数直接省略，系统会填默认值；动作按执行顺序排列，最多 12 个。',
-    '5. layer 必须从用户给出的图层名里选；没有合适图层时省略该参数。',
-    '6. why 用一句中文说明这样安排的原因。',
+    '5. 选项参数写英文值或括号里的中文名都算数（circle / 圆形 等价）。',
+    '6. layer、目标一类的参数只能填用户给出的图层名；不确定就省略，省略表示作用于当前图层。',
+    '7. 需要新对象时先用 createObject 建一个，后面的积木再用它的名字引用它。',
+    '8. 一句话能表达的需求不要拆成多个积木；能用一条动效积木就别堆关键帧。',
+    '9. why 用一句中文说明这样安排的原因。',
     '',
     '可用积木：',
     formatActionCatalog(),
@@ -294,10 +319,15 @@ function coerceSlotValue(value, spec, { layers, op, key }) {
     return { ok: true, value: s };
   }
   if (type === 'sel') {
-    const opts = menuOptions(spec.menu);
-    if (opts && !opts.includes(s)) return { ok: false, reason: `不在可选值 ${opts.join('/')} 里：${s}` };
-    if (['layersText', 'layersShape', 'targets', 'markers'].includes(spec.menu)) {
-      if (layers.length && !layers.includes(s)) return { ok: false, reason: `图层「${s}」不存在` };
+    const pairs = menuPairs(spec.menu);
+    if (pairs) {
+      const hit = pairs.find(p => p[0] === s) || pairs.find(p => p[1] === s);
+      // 模型常写中文标签（「圆形」「正片叠底」），积木里存的是英文值，翻不回就整条丢掉
+      if (!hit) return { ok: false, reason: `不在可选值 ${pairs.map(p => p[0]).join('/')} 里：${s}` };
+      return { ok: true, value: hit[0] };
+    }
+    if (LAYER_MENUS.includes(spec.menu)) {
+      if (layers.length && !layers.includes(s)) return { ok: false, reason: `图层或对象「${s}」不存在` };
     }
     return { ok: true, value: s };
   }
@@ -312,6 +342,9 @@ function coerceSlotValue(value, spec, { layers, op, key }) {
 export function coerceActions(rawActions, { layers = [] } = {}) {
   const actions = [];
   const warnings = [];
+  // 「创建一个圆形对象「按钮」，然后把它移到 300,400」：按钮不在 IR 图层里，
+  // 但同批次 createObject 建出来的名字后面的积木可以引用，否则会误报「对象不存在」。
+  const names = [...layers];
 
   for (const raw of Array.isArray(rawActions) ? rawActions : []) {
     if (!raw || typeof raw !== 'object') { warnings.push('忽略了一个不是对象的动作'); continue; }
@@ -332,11 +365,12 @@ export function coerceActions(rawActions, { layers = [] } = {}) {
       if (typeof value === 'object') value = value.v ?? value.value;
       if (value === undefined || value === null) return;
 
-      const r = coerceSlotValue(value, spec, { layers, op, key });
+      const r = coerceSlotValue(value, spec, { layers: names, op, key });
       if (r.ok) slots[key] = SLOT_WRAP[spec.type](r.value);
       else warnings.push(`${op}.${key}：${r.reason}`);
     });
 
+    if (op === 'createObject' && slots.name) names.push(String(slots.name.v));
     actions.push({ op, slots, why: String(raw.why || def.label).slice(0, 120) });
     if (actions.length >= 12) {
       warnings.push('动作超过 12 个，只保留前 12 个');

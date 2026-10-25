@@ -20,7 +20,7 @@
 
 import { encodeGIF, encodeGIFFromSource } from './gif.js';
 import { createZip } from './zip.js';
-import { evaluateFrame } from './evaluator.js';
+import { createRuntime } from './runtime.js';
 import { render } from './renderer.js';
 
 /* ============================================================
@@ -69,6 +69,8 @@ class FrameSource {
     this.from = opts.from || 0;
     this.to = opts.to == null ? ir.project.duration : opts.to;
     this.total = Math.max(0, Math.round((this.to - this.from) * this.fps));
+    // 每个导出任务独立 runtime：与预览缓存隔离，且绝不播放预览声音
+    this.runtime = createRuntime(ir, audio, { sound: null });
   }
 
   makeCanvas(w = this.w, h = this.h) {
@@ -85,12 +87,11 @@ class FrameSource {
     const sx = canvas.width / this.ir.project.width;
     const sy = canvas.height / this.ir.project.height;
     ctx.setTransform(sx, 0, 0, sy, 0, 0);
-    const { state } = evaluateFrame(this.ir, t, this.audio);
-    state.ir = this.ir;
-    state.order = this.ir.layers.map(l => l.id);
-    render(state, ctx, Object.assign({ time: t }, env));
+    this.runtime.advanceTo(t);
+    const state = this.runtime.compose();
+    render(state, ctx, Object.assign({ time: state.t }, env));
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    return { t, ctx };
+    return { t: state.t, ctx };
   }
 }
 

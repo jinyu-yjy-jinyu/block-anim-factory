@@ -453,10 +453,46 @@ t('在线AI:默认本地、配置可持久化', () => {
 t('在线AI:Base URL 归一化与动作白名单', () => {
   eq(AIO.normalizeBaseUrl('http://127.0.0.1:11434/v1/chat/completions/'), 'http://127.0.0.1:11434/v1');
   eq(AIO.normalizeBaseUrl('https://x.test/v1///'), 'https://x.test/v1');
-  const ops = AIO.actionCatalog().map(a => a.op);
+  const catalog = AIO.actionCatalog();
+  const ops = catalog.map(a => a.op);
   ok(ops.includes('fadeIn'));
   ok(!ops.includes('notReal'));
-  ok(!ops.includes('particles'), '已知有问题的粒子积木不对在线模型开放');
+  // 白名单 = 所有「能独立成句」的语句积木：既不是帽子，也没有子栈槽。
+  // 手写清单一定会漏（#19 就是这么来的），所以这里用定义反推校验。
+  const expected = BL.BLOCK_DEFS
+    .filter(d => !d.isLeaf && !BL.HAT_OPS.has(d.op) && !d.slots.some(s => s.type === 'blocks'))
+    .map(d => d.op);
+  eq(ops.slice().sort().join(','), expected.slice().sort().join(','), '在线白名单与积木定义不一致');
+  ok(!ops.includes('forever'), 'C 形积木要嵌套子栈，扁平 actions 表达不了');
+  ok(!ops.includes('whenStart'), '帽子积木不对在线模型开放');
+  const part = catalog.find(a => a.op === 'particles');
+  eq(part.slots.map(s => s.key).join(','), 'count,start,life,color,speed,lifeScale,spread,gravity,drag,sizeScale');
+  // 提示词里要把闭集菜单的实际取值写出来，否则模型只能猜
+  const cat = AIO.formatActionCatalog();
+  ok(/createObject/.test(cat) && /rect\(矩形\)/.test(cat), '对象类型菜单要把取值列进提示词');
+  ok(/可选 this\(当前脚本\)/.test(cat), '停止范围菜单要把取值列进提示词');
+});
+
+t('在线AI:选项参数接受中文名，运行时创建的对象可被后续动作引用', () => {
+  const { actions, warnings } = AIO.coerceActions([
+    { op: 'createObject', slots: { name: '按钮', type: '圆形', x: 300, y: 400 } },
+    { op: 'glideTo', slots: { layer: '按钮', x: 800, y: 200, dur: 1.2 } },
+    { op: 'setBlendMode', slots: { layer: '标题文字', mode: '正片叠底' } },
+    { op: 'setVar', slots: { name: 'score', value: 10, scope: '全局' } },
+    { op: 'playSound', slots: { sound: '哔声', volume: 80 } },
+    { op: 'setBlendMode', slots: { layer: '标题文字', mode: '不存在模式' } },
+  ], { layers: ['标题文字'] });
+  eq(warnings.length, 1, warnings.join('|'));
+  ok(warnings[0].includes('setBlendMode.mode'), `告警应指向非法选项：${warnings[0]}`);
+  eq(actions.length, 6);
+  eq(actions[0].slots.type.v, 'circle', '「圆形」应换成积木里真正存的 circle');
+  eq(actions[1].slots.layer.v, '按钮', '同批次 createObject 建出的对象名应被认可');
+  eq(actions[2].slots.mode.v, 'multiply');
+  eq(actions[3].slots.scope.v, 'global');
+  eq(actions[4].slots.sound.v, 'beep');
+  const c = AI.actionsToBlocks(actions);
+  eq(c.skipped.length, 0, JSON.stringify(c.skipped));
+  eq(c.blocks.length, 6);
 });
 
 t('在线AI:模型动作被强类型校验后编译', () => {
@@ -697,6 +733,11 @@ t('AI:每个积木的槽位落位都与 blocks.js 的类型相符', () => {
     '标题数字滚动到 500', '标题逐词高亮', '音频波形柱 64 个', '环形频谱 48 个',
     '柱状图生长 30,55,80', '折线图生长 10,40,25', '画一个红色方块',
     '等待 2 秒', '重复 4 次',
+    // 新增的 P0 句式：这些积木槽位多、类型杂，最容易重演 #19 的错位
+    '粒子 120 个，速度 300', '重复器复制 10 个，间距 120',
+    '广播「开始」', '一直重复', '把变量 score 设为 10', '得分增加 5',
+    '新建列表「名单」', '往列表「名单」加入 甲', '创建一个圆形对象「按钮」',
+    '隐藏图层 标题', '显示对象 标题', '移到 300,400', '滑行到 800,200，用时 1.2 秒',
   ];
   const p = new AI.NLParser({ layers: ['标题文字', '标题', '装饰方块'] });
   for (const s of sentences) {
@@ -710,13 +751,45 @@ t('AI:每个积木的槽位落位都与 blocks.js 的类型相符', () => {
         const got = slot.value.t;
         if (!got) return;
         if (got === spec.type) return;
-        // particles / repeater 的 blocks.js 槽位本身与 evaluator 差一个图层槽，
-        // 光靠 SLOT_ORDER 补不回来（已上报，不在这批范围内）。
-        if (b.op === 'particles' || b.op === 'repeater') return;
         ok(false, `${b.op} 第 ${i} 槽是 ${spec.type}/${spec.label}，却拿到 ${got}/${JSON.stringify(slot.value.v)}（「${s}」）`);
       });
     }
   }
+});
+t('AI:新增的 P0 句式能被认出并编译成积木', () => {
+  // 只测「落位类型对」不够：句式没认出时 actions 是空的，循环直接跳过，
+  // 测试照样绿。这里钉住每句话确实产出对应的 op。
+  const cases = [
+    ['广播「开始」', 'broadcast'],
+    ['一直重复', 'forever'],
+    ['把变量 score 设为 10', 'setVar'],
+    ['得分增加 5', 'changeVar'],
+    ['新建列表「名单」', 'listCreate'],
+    ['往列表「名单」加入 甲', 'listAdd'],
+    ['创建一个圆形对象「按钮」', 'createObject'],
+    ['隐藏图层 标题', 'hideObject'],
+    ['显示对象 标题', 'showObject'],
+    ['移到 300,400', 'setPosition'],
+    ['滑行到 800,200，用时 1.2 秒', 'glideTo'],
+    ['粒子 120 个，速度 300', 'particles'],
+    ['重复器复制 10 个，间距 120', 'repeater'],
+  ];
+  const p = new AI.NLParser({ layers: ['标题文字', '标题'] });
+  for (const [s, expect] of cases) {
+    const r = p.parse(s);
+    eq(r.actions.length, 1, `「${s}」应认出 1 个动作，警告：${r.warnings.join('|')}`);
+    eq(r.actions[0].op, expect, `「${s}」识别错了`);
+    const c = AI.actionsToBlocks(r.actions);
+    eq(c.skipped.length, 0, `「${s}」编译失败：${JSON.stringify(c.skipped)}`);
+  }
+});
+t('AI:坐标里的逗号不会被当成子句分隔符', () => {
+  // 「移动到 300,400」拆成两个子句的话，两个都听不懂，用户看到的是「没听懂」。
+  const r = parser().parse('标题移到 300,400');
+  eq(r.warnings.length, 0, r.warnings.join('|'));
+  eq(r.actions.length, 1);
+  eq(r.actions[0].slots.x.v, 300);
+  eq(r.actions[0].slots.y.v, 400);
 });
 t('AI:滑入方向经求值器验证真的朝对的一边', () => {
   // 光看槽位类型不够：距离传成带符号的值，类型仍是 num，但方向会反。
